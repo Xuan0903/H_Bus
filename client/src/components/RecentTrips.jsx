@@ -66,7 +66,7 @@ export default function RecentTrips({ trips = [], showMore, onToggle, statusText
                 {fmt(r.booking_time)} ・ {r.booking_number} 人
               </div>
               <div style={{ fontSize: 12, color: '#6b7280', marginTop: 2 }}>
-                狀態：審核 {statusText(r.review_status)} ・ 支付 {statusText(r.payment_status)} ・ 編號：{r.reservation_id}
+                狀態：審核 {statusText(r.review_status)} ・ 支付 {statusText(r.payment_status)} ・ 編號：{r.booking_code || r.reservation_id}
               </div>
             </div>
           ))}

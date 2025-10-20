@@ -54,3 +54,12 @@ class CarInsertRequest(BaseModel):
     Deg: int
     acc: int
     rcv_dt: str | None = None
+
+class CreatePaymentOut(BaseModel):
+    pay_url: str
+    reservation_id: str
+
+class CreatePaymentIn(BaseModel):
+    amount: str = Field(..., description="金額（以元為單位，純數字字串，例如 '10' 或 '199'）")
+    order_number: str = Field(..., min_length=1, max_length=64, description="商家訂單編號")
+

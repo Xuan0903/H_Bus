@@ -165,7 +165,7 @@ export default function HomeView({ onAction, user, onNavigateRoutes }) {
                 X: json.Y?.[k] ?? null, // 這裡反過來取
                 Y: json.X?.[k] ?? null, // 這裡反過來取
                 direction: json.direction?.[k] ?? '',
-                Current_Loaction: json.Current_Loaction?.[k] ?? ''
+                Current_Location: json.Current_Location?.[k] ?? ''
               }))
             }
 
@@ -192,7 +192,7 @@ export default function HomeView({ onAction, user, onNavigateRoutes }) {
                 id: r.id,
                 route: r.name,
                 directionLabel: car ? `(${normDir(car.direction) === '返程' ? '返' : '去'})` : '',
-                stop: car?.Current_Loaction || car?.nearest_stop_name || '—',
+                stop: car?.Current_Location || car?.nearest_stop_name || '—',
                 eta: '',
                 status: car && car.X != null && car.Y != null ? '當前所在' : '未發車',
                 key: `${r.id}-${car?.station_id || 'none'}`,

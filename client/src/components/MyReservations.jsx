@@ -77,12 +77,14 @@ export default function MyReservations({ user, filterExpired = false }) {
   }
 
   const now = new Date()
-  const visibleResv = filterExpired
+  const visibleResv = (filterExpired
     ? myResv.filter(r => {
-      const t = new Date(r.booking_time)
-      return !isNaN(t) && t >= now
-    })
+        const t = new Date(r.booking_time)
+        return !isNaN(t) && t >= now
+      })
     : myResv
+  ).filter(r => String(r.payment_status).toLowerCase() !== 'refunded')
+
 
   return (
     <section className="card">
@@ -118,7 +120,9 @@ export default function MyReservations({ user, filterExpired = false }) {
               <div className="resv-main">
                 <div className="resv-title">{r.booking_start_station_name} → {r.booking_end_station_name}</div>
                 <div className="resv-sub">{fmt(r.booking_time)} ・ {r.booking_number} 人</div>
-                <div className="small" style={{ color: '#000' }}>預約編號：{r.reservation_id}</div>
+                <div className="small" style={{ color: '#000' }}>
+                  預約代碼：{r.booking_code || r.reservation_id}
+                </div>
                 <div className="resv-status">
                   <span className={`status-chip ${cls(r.review_status)}`}>審核：{translateStatus(r.review_status)}</span>
                   <span className={`status-chip ${cls(r.payment_status)}`}>付款：{translateStatus(r.payment_status)}</span>
@@ -187,10 +191,11 @@ export default function MyReservations({ user, filterExpired = false }) {
                       className="btn btn-blue"
                       onClick={async () => {
                         try {
-                          const amount = String(selectedResv.booking_number * 10)
-                          const orderNumber = String(selectedResv.reservation_id)
+                          const amount = String(selectedResv.booking_number * 3)
+                          const orderNumber = String(selectedResv.booking_code || selectedResv.reservation_id)
                           const confirmed = window.confirm('即將前往付款頁面，是否繼續？')
                           if (!confirmed) return
+                          // Call payments API
                           const resp = await fetch('/payments', {
                             method: 'POST',
                             headers: { 'Content-Type': 'application/json' },

@@ -13,9 +13,9 @@ export default function RouteDetail({ route, onClose, highlightStop }) {
   const [viewMode, setViewMode] = useState('list')
   const isStatic = route.source === 'static'
   const isSingleDirection = route.direction && route.direction.includes('單向')
-  const [loadingCars, setLoadingCars] = useState(false)
   const [initialLoading, setInitialLoading] = useState(true)
   const [tick, setTick] = useState(0)
+  const [loadingCars, setLoadingCars] = useState(false)
   const [cars, setCars] = useState([])
 
   // 定時刷新 tick
@@ -68,18 +68,21 @@ export default function RouteDetail({ route, onClose, highlightStop }) {
     ]).then(([stopsData, scheduleData]) => {
       if (cancelled) return
 
-      // 以 stop_name 對應 schedule
-      const merged = stopsData.map(stop => {
-        const match = scheduleData.find(s => s.stop_name === stop.stopName)
-        return {
-          ...stop,
-          next_time: match?.next_time || null,
-          full_schedule: match?.full_schedule || null,
-        }
-      })
+    console.log("📡 stopsData from /Route_Stations:", stopsData)
+    console.log("🕒 scheduleData from /Route_ScheduleTime:", scheduleData)
 
-      console.log("🚏 merged stops:", merged)
-      setStops(merged)
+    const merged = stopsData.map(stop => {
+      const match = scheduleData.find(s => s.stop_name === stop.stopName)
+      return {
+        ...stop,
+        next_time: match?.next_time || null,
+        full_schedule: match?.full_schedule || null,
+      }
+    })
+
+    console.log("🚏 merged stops result:", merged)
+    setStops(merged)
+
     })
 
     return () => { cancelled = true }
@@ -89,7 +92,6 @@ export default function RouteDetail({ route, onClose, highlightStop }) {
   // 抓取車輛位置
   useEffect(() => {
     let cancelled = false
-    const [loadingCars, setLoadingCars] = [setLoading, setLoading] // reuse loading state if you already have it
 
     // 防止太頻繁呼叫 API（3 秒內多次只會執行一次）
     const fetchCars = debounce(async () => {
@@ -136,133 +138,153 @@ export default function RouteDetail({ route, onClose, highlightStop }) {
 
   // 顯示的站點 + 車輛狀態
   const displayStops = useMemo(() => {
+    // === [新增] Debug + 自動班次時間判斷 ===
+    if (!("__FORCE_ALL_UNDEPARTED__" in window)) {
+      window.__FORCE_ALL_UNDEPARTED__ = false;
+    }
+    if (Object.getOwnPropertyDescriptor(window, "test")) {
+      delete window.test;
+    }
+    Object.defineProperty(window, "test", {
+      configurable: true,
+      get() {
+        window.__FORCE_ALL_UNDEPARTED__ = !window.__FORCE_ALL_UNDEPARTED__;
+        console.log(
+          "🚍 [DEBUG] 強制未發車：",
+          window.__FORCE_ALL_UNDEPARTED__ ? "啟用" : "關閉"
+        );
+        return "（強制未發車已" + (window.__FORCE_ALL_UNDEPARTED__ ? "啟用" : "關閉") + "）";
+      }
+    });
+
+    // === 自動判斷班次時間 ===
+    let forceAllUndeparted = !!window.__FORCE_ALL_UNDEPARTED__;
+    const now = dayjs();
+
+    try {
+      const allTimes = (stops || [])
+        .flatMap(s => (s.full_schedule || "")
+          .split(",")
+          .map(t => dayjs(`${now.format("YYYY-MM-DD")} ${t.trim()}`, "YYYY-MM-DD HH:mm"))
+          .filter(t => t.isValid())
+        )
+        .sort((a, b) => a.valueOf() - b.valueOf());
+
+      const firstBus = allTimes[0];
+      const lastBus = allTimes[allTimes.length - 1];
+
+      if (firstBus && now.isBefore(firstBus)) {
+        console.log(
+          "🕕 現在時間早於首班車：",
+          firstBus.format("HH:mm"),
+          "目前時間：",
+          now.format("HH:mm")
+        );
+        forceAllUndeparted = true;
+      } else if (lastBus && now.isAfter(lastBus)) {
+        console.log(
+          "⛔ 現在時間已過末班車：",
+          lastBus.format("HH:mm"),
+          "目前時間：",
+          now.format("HH:mm")
+        );
+        forceAllUndeparted = true;
+      }
+    } catch (e) {
+      console.warn("班次時間檢查錯誤:", e);
+    }
+
+    // === 合併站點資料 ===
     const unified = (isStatic ? list : stops).map((s, idx) => ({
-      name: s.stopName || s['站點'] || `第${idx+1}站`,
-      order: Number(s.order ?? s['站次'] ?? (idx+1)),
+      name: s.stopName || s['站點'] || `第${idx + 1}站`,
+      order: Number(s.order ?? s['站次'] ?? (idx + 1)),
       latitude: Number(s.latitude ?? s['去程緯度'] ?? s['緯度']),
       longitude: Number(s.longitude ?? s['去程經度'] ?? s['經度']),
       etaFromStart: s.etaFromStart ?? s['首站到此站時間'] ?? null,
       etaToHere: s.etaToHere ?? null,
       schedule: s.schedule || s['schedule'] || s['時刻表'] || "",
-      next_time: s.next_time || s['next_time'] || null,          // 👈 新增這兩行
-      full_schedule: s.full_schedule || s['full_schedule'] || "", // 👈
-    }))
+      next_time: s.next_time || s['next_time'] || null,
+      full_schedule: s.full_schedule || s['full_schedule'] || "",
+    }));
 
-
-
-    let car = cars.find(
-      c =>
-        String(c.route) === String(route.id) ||
-        String(c.route) === String(route.route_id) ||
-        String(c.route) === String(route.name)
-    )
-
-    // 新增多方向支援：若同一路線有去程/回程車都顯示對應的
-    if (car && car.direction !== selectedDir) {
-      const sameRouteCars = cars.filter(
-        c =>
-          String(c.route) === String(route.id) ||
-          String(c.route) === String(route.route_id) ||
-          String(c.route) === String(route.name)
-      )
-
-      const matched = sameRouteCars.find(c => c.direction === selectedDir)
-      if (matched) car = matched
-    }
-
-
-    if (!car) {
-      return unified.map(s => ({
-        ...s,
-        status: { label: "未發車", tone: "orange" }
-      }))
-    }
-
-    // 如果方向不符 → 全部顯示未發車
-    // if (car.direction !== selectedDir) {
-    //   return unified.map(s => ({
-    //     ...s,
-    //     status: { label: "未發車", tone: "orange" }
-    //   }))
-    // }
-    
-    // 如果有多方向車輛，顯示符合方向的車次資訊，其餘不標未發車
+    // === 找出車輛狀態 ===
     const activeCars = cars.filter(c =>
       String(c.route) === String(route.id) ||
       String(c.route) === String(route.route_id) ||
       String(c.route) === String(route.name)
-    )
+    );
 
-    // 找出符合目前方向的車
-    const currentCar = activeCars.find(c => c.direction === selectedDir)
+    const currentCar = activeCars.find(c => c.direction === selectedDir);
+    const carToUse = currentCar || activeCars[0] || null;
 
-    // 若該方向沒有車，改用第一台當 fallback
-    const carToUse = currentCar || activeCars[0]
-
-    if (!carToUse) {
-      return unified.map(s => ({
-        ...s,
-        status: { label: "未發車", tone: "orange" }
-      }))
-    }
-
-    // 找到目前所在站
-    let currentIndex = unified.findIndex(s => s.name === car.currentLocation)
-
-return unified.map((s, idx) => {
-  // 到站中
-  if (idx === currentIndex) {
-    return { ...s, status: { label: "到站中", tone: "green" } }
-  }
-
-  // 有下一站的情況下才計算
-  if (idx > currentIndex && carToUse) {
-    let totalSeconds = 0
-    const speed = carToUse.Speed > 0 ? carToUse.Speed : 30 // km/h
-
-    // 逐段累加：從當前站到這一站的距離總和
-    for (let i = currentIndex; i < idx; i++) {
-      const curStop = unified[i]
-      const nextStop = unified[i + 1]
-      if (!nextStop) continue
-
-      const lat1 = Number(curStop.latitude)
-      const lon1 = Number(curStop.longitude)
-      const lat2 = Number(nextStop.latitude)
-      const lon2 = Number(nextStop.longitude)
-
-      if ([lat1, lon1, lat2, lon2].every(Number.isFinite)) {
-        const distM = haversine({ lat: lat1, lon: lon1 }, { lat: lat2, lon: lon2 })
-        totalSeconds += distM / (speed * 1000 / 3600)
+    // === 根據狀態生成顯示資料 ===
+    return unified.map((s, idx) => {
+      // 全域強制或時間判斷 → 全未發車
+      if (forceAllUndeparted) {
+        return { ...s, status: { label: "未發車", tone: "orange" } };
       }
-    }
 
-    // 只有下一站顯示「即將到站」
-    if (idx === currentIndex + 1 && totalSeconds <= 60) {
-      return { ...s, status: { label: "即將到站", tone: "blue" } }
-    }
+      // 若沒有車輛資料 → 未發車
+      if (!carToUse) {
+        return { ...s, status: { label: "未發車", tone: "orange" } };
+      }
 
-    const minutes = Math.max(1, Math.round(totalSeconds / 60))
-    return { ...s, status: { label: `預估 ${minutes} 分鐘後抵達`, tone: "blue" } }
-  }
+      // 找出當前車位置
+      const currentIndex = unified.findIndex(st => st.name === carToUse.currentLocation);
 
-  // 其他站維持原本的顯示方式
-  const now = dayjs()
-  const scheduleStr = s.full_schedule || s.schedule || ""
-  const times = scheduleStr
-    .split(",")
-    .map(t => dayjs(t.trim(), "HH:mm"))
-    .filter(t => t.isValid())
-  const next = times.find(t => t.isAfter(now)) || times[times.length - 1]
-  const nextLabel = next ? next.format("HH:mm") : null
-  const label = nextLabel ? `下一班時間 ${nextLabel}` : "下一班時間 -"
+      if (idx === currentIndex) {
+        return { ...s, status: { label: "到站中", tone: "green" } };
+      }
 
-  return { ...s, status: { label, tone: "blue" } }
-})
+      if (idx > currentIndex) {
+        let totalSeconds = 0;
+        const speed = carToUse.Speed > 0 ? carToUse.Speed : 30;
 
+        for (let i = currentIndex; i < idx; i++) {
+          const curStop = unified[i];
+          const nextStop = unified[i + 1];
+          if (!nextStop) continue;
 
+          const lat1 = Number(curStop.latitude);
+          const lon1 = Number(curStop.longitude);
+          const lat2 = Number(nextStop.latitude);
+          const lon2 = Number(nextStop.longitude);
 
-        }, [isStatic, list, stops, cars, route.id, selectedDir])
+          if ([lat1, lon1, lat2, lon2].every(Number.isFinite)) {
+            const distM = haversine({ lat: lat1, lon: lon1 }, { lat: lat2, lon: lon2 });
+            totalSeconds += distM / (speed * 1000 / 3600);
+          }
+        }
+
+        if (idx === currentIndex + 1 && totalSeconds <= 60) {
+          return { ...s, status: { label: "即將到站", tone: "blue" } };
+        }
+
+        const minutes = Math.max(1, Math.round(totalSeconds / 60));
+        return { ...s, status: { label: `預估 ${minutes} 分鐘後抵達`, tone: "blue" } };
+      }
+
+      // 一般班次：顯示下一班時間
+      const scheduleStr = s.full_schedule || s.schedule || "";
+      const times = scheduleStr
+        .split(",")
+        .map(t => {
+          const parsed = dayjs(`${now.format("YYYY-MM-DD")} ${t.trim()}`, "YYYY-MM-DD HH:mm");
+          return parsed.isValid() ? parsed : null;
+        })
+        .filter(Boolean)
+        .sort((a, b) => a.valueOf() - b.valueOf());
+
+      const next = times.find(t => t.isAfter(now)) || (s.next_time
+        ? dayjs(`${now.format("YYYY-MM-DD")} ${s.next_time}`, "YYYY-MM-DD HH:mm")
+        : null);
+
+      const nextLabel = next ? next.format("HH:mm") : null;
+      const label = nextLabel ? `下一班時間 ${nextLabel}` : "下一班時間 -";
+
+      return { ...s, status: { label, tone: "blue" } };
+    });
+  }, [isStatic, list, stops, cars, route.id, selectedDir]);
 
   const staticStopsForMap = useMemo(() => {
     if (!isStatic) return []

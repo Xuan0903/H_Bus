@@ -13,7 +13,7 @@ class MySQL_Doing:
     def __init__(self):
         self.Host = os.getenv("Host", "127.0.0.1")
         self.User = os.getenv("User", "root")
-        self.Port = int(os.getenv("Port", 3306))
+        self.Port = int(os.getenv("Port", 3307))
         self.Password = os.getenv("Password_SQL", "")
         self.Database = os.getenv("Database", "")
         self.conn = self._connect()  # 💡 初始化連線

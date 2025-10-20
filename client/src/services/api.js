@@ -208,6 +208,6 @@ export async function getCarPositions() {
     X: parseFloat(data.X[i]),
     Y: parseFloat(data.Y[i]),
     direction: data.direction[i],
-    currentLocation: data.Current_Loaction[i]
+    currentLocation: data.Current_Location[i]
   }))
 }
