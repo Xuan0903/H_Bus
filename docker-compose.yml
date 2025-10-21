@@ -1,0 +1,110 @@
+version: "3.9"
+
+services:
+  redis:
+    image: redis:7-alpine
+    container_name: hbus-redis
+    ports:
+      - "6379:6379"
+
+  mariadb:
+    image: mariadb:10.11
+    container_name: hbus-mariadb
+    environment:
+      - MARIADB_ROOT_PASSWORD=109109
+      - MARIADB_DATABASE=bus_system
+    command: ["--port=3307"]           # 保留廠商設定：容器內 MariaDB 改聽 3307
+    ports:
+      - "3307:3307"                    # 對外也保持 3307 → 3307
+    volumes:
+      - ./db_data:/var/lib/mysql
+      - ./bus_system_backup.sql:/docker-entrypoint-initdb.d/bus_system_backup.sql:ro
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-P", "3307", "-uroot", "-p109109"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  client-api:
+    build:
+      context: ./Client
+      dockerfile: Dockerfile
+      args:
+        VITE_API_BASE_URL: "/api"
+    container_name: hbus-client-api
+    ports:
+      - "8700:8700"
+    environment:
+      REDIS_URL: "redis://redis:6379/0"
+      FRONTEND_DEFAULT_URL: "https://ce952c58ead2.ngrok-free.app"
+      LINE_CHANNEL_ID: "2008298748"
+      LINE_CHANNEL_SECRET: "8b363c06ac000d89493ee62511790b48"
+      APP_SESSION_SECRET: "sd8f7s9df8sdf7"
+      Sender_email: "tailin1125@gmail.com"
+      Password_email: "ceaa fcfl wubf mjss"
+
+      # 保留「以主機位址連 DB」的語意，將原本的 192.168.0.126 改為 Mac/Docker 標準寫法
+      Host: "host.docker.internal"
+      User: "root"
+      Port: "3307"
+      Password_SQL: "109109"
+      Database: "bus_system"
+
+      MERCHANT_ID: "106952201270001"
+      TERMINAL_ID: "70002146"
+      STORE_CODE: "e4f76eb8-d236-45fb-984b-92b2d1912492"
+      KEY: "3abae022acd6fc873821411c0b402c0fbe90d90bdda295ed15296f8ae465bf8b"
+      IV: "12fe9f5e0c3cc7c664894f19ba265050"
+      LAYMON: "iqrc.epay365.com.tw"
+    # depends_on:
+    #   - redis
+    #   - mariadb
+    # # SSL 先跳過：如需掛載，改用你在 Mac 的憑證路徑
+    # # volumes:
+    # #   - "/path/to/SSL/on/mac:/ssl:ro"
+    # command: [
+    #   "uvicorn", "Server:app",
+    #   "--host", "0.0.0.0",
+    #   "--port", "8700",
+    #   "--reload"
+    # ]
+    depends_on:
+      mariadb:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    restart: unless-stopped
+    command: >
+      sh -lc "sleep 3 &&
+              uvicorn Server:app --host 0.0.0.0 --port 8700 --reload"
+
+  bus-api:
+    build:
+      context: ./my-bus-system
+      dockerfile: Dockerfile
+    container_name: hbus-bus-api
+    ports:
+      - "8600:8600"
+    environment:
+      REDIS_URL: "redis://redis:6379/1"
+
+      # 同上，維持「主機位址」語意，改為 host.docker.internal
+      MYSQL_HOST: "host.docker.internal"
+      MYSQL_USER: "root"
+      MYSQL_PORT: "3307"
+      MYSQL_PASSWORD: "109109"
+      MYSQL_DATABASE: "bus_system"
+
+      MYSQL_TABLE: "bus_route_stations"
+      SQLITE_PATH: "/data/webui.db"
+    depends_on:
+      - redis
+      - mariadb
+    # 同理，若要 SSL 再掛
+    # volumes:
+    #   - "/path/to/SSL/on/mac:/ssl:ro"
+    # command: ["npm", "run", "serve"]
+        # 覆蓋啟動指令：先 build 前端，再用 python3 跑 uvicorn（暫時不帶 SSL）
+    command: >
+      sh -lc "npm run build &&
+              python3 -m uvicorn app:app --host 0.0.0.0 --port 8600 --reload"

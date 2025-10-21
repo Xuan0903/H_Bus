@@ -20,7 +20,7 @@ export default function Header() {
           aria-label="回到首頁"
         >
           <img
-            src="/Logo.png"
+            src="/public/Logo.png"
             alt="市民小巴 Logo"
             className="logo-image"
           />

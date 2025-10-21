@@ -1,0 +1,11 @@
+fastapi
+uvicorn[standard]
+python-dotenv
+pymysql
+SQLAlchemy
+bcrypt
+pytz
+pandas
+redis
+python-multipart
+Path
