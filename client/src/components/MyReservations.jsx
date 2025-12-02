@@ -191,7 +191,7 @@ export default function MyReservations({ user, filterExpired = false }) {
                       className="btn btn-blue"
                       onClick={async () => {
                         try {
-                          const amount = String(selectedResv.booking_number * 3)
+                          const amount = String(selectedResv.booking_number * 50)
                           const orderNumber = String(selectedResv.booking_code || selectedResv.reservation_id)
                           const confirmed = window.confirm('即將前往付款頁面，是否繼續？')
                           if (!confirmed) return

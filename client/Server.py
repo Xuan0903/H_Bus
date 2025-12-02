@@ -1,56 +1,81 @@
 # ====================================
 # 🧩 專案內部模組
 # ====================================
-from Backend import Define
-from Backend.MySQL import MySQL_Doing
-# === 產生乘車 QR 與驗證乘車資格 ===
 from Backend.CreateUserQR import generate_boarding_token, save_qr_png
 from Backend.CheckQR import verify_boarding_token
+from Backend.MySQL import MySQL_Doing
+from Backend import Define
 # ====================================
 # 📦 第三方套件
 # ====================================
-from fastapi import FastAPI, Request, HTTPException, APIRouter, Body
+from fastapi import FastAPI, Request, HTTPException, APIRouter, Body, Depends, status
+from fastapi.openapi.docs import get_swagger_ui_html, get_redoc_html
+from fastapi.exception_handlers import http_exception_handler
+from fastapi.responses import RedirectResponse, FileResponse, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import RedirectResponse, FileResponse, StreamingResponse, HTMLResponse
+from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from Crypto.Cipher import AES
 from Crypto.Util.Padding import pad
 from dotenv import load_dotenv
-from pydantic import BaseModel, Field
 from io import BytesIO
 import pandas as pd
+import holidays
+import qrcode
 import redis
 import httpx
-import qrcode
 # ====================================
 # ✅ 標準庫
 # ====================================
-from email.mime.text import MIMEText
-from email.mime.multipart import MIMEMultipart
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
-from zoneinfo import ZoneInfo
-from datetime import datetime
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
 from urllib.parse import urlparse, quote
 from base64 import b64decode
+from typing import List, Tuple
+from zoneinfo import ZoneInfo
+from datetime import datetime
 from decimal import Decimal
-from typing import List, Tuple, Optional
 from threading import RLock
 import os, json, time, math, base64, requests
 import urllib, hmac, hashlib, secrets, tempfile, smtplib
 import uuid
-
+# ====================================
+# 定義 Fast API 項目 api / app 隔離
+# ====================================
 api = APIRouter(prefix='/api')
-
-load_dotenv()
-MySQL_Doing = MySQL_Doing()
-
 app = FastAPI(
     title="H_Bus API",
     version="V0.1.0",
     description="H_Bus 服務的最小 API 範本，含健康檢查與根路由。",
+    docs_url=None,      # 關掉預設 /docs
+    redoc_url=None      # 關掉預設 /redoc
 )
+# 
+security = HTTPBasic()
+DOCS_USER = os.getenv("DOCS_USER", "admin")
+DOCS_PASS = os.getenv("DOCS_PASS", "Hbus@109")
+
+def verify_docs_auth(credentials: HTTPBasicCredentials = Depends(security)):
+    correct_user = secrets.compare_digest(credentials.username, DOCS_USER)
+    correct_pass = secrets.compare_digest(credentials.password, DOCS_PASS)
+    if not (correct_user and correct_pass):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Not authenticated",
+            headers={"WWW-Authenticate": "Basic"},
+        )
+    return True
+
+@app.get("/docs", include_in_schema=False)
+def custom_docs(credentials: bool = Depends(verify_docs_auth)):
+    return get_swagger_ui_html(openapi_url="/openapi.json", title="Secure API Docs")
+
+@app.get("/redoc", include_in_schema=False)
+def custom_redoc(credentials: bool = Depends(verify_docs_auth)):
+    return get_redoc_html(openapi_url="/openapi.json", title="Secure API ReDoc")
 
 # === 加入 CORS 設定 ===    
 app.add_middleware(
@@ -60,11 +85,16 @@ app.add_middleware(
     allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     allow_headers=["*"],
 )
+# ====================================
+# 初始化
+# ====================================
+load_dotenv()
+MySQL_Doing = MySQL_Doing()
 
 # Simple in-process cache to reduce DB load when users toggle directions rapidly
-_ROUTE_STOPS_CACHE: dict[Tuple[int, str], Tuple[float, list]] = {}
-_ROUTE_STOPS_TTL_SEC = 120  # 2 minutes
-_ROUTE_STOPS_LOCK = RLock()
+# _ROUTE_STOPS_CACHE: dict[Tuple[int, str], Tuple[float, list]] = {}
+# _ROUTE_STOPS_TTL_SEC = 120  # 2 minutes
+# _ROUTE_STOPS_LOCK = RLock()
 
 # === Redis 初始化 ===
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
@@ -83,11 +113,9 @@ AUTHORIZE_URL = "https://access.line.me/oauth2/v2.1/authorize"
 TOKEN_URL = "https://api.line.me/oauth2/v2.1/token"
 PROFILE_URL = "https://api.line.me/v2/profile"
 APP_SESSION_SECRET = os.getenv("APP_SESSION_SECRET", "my-secret")
-
 # === email 相關設定 ===
 SENDER_EMAIL = os.getenv("Sender_email")
 SENDER_PASS  = os.getenv("Password_email")
-
 # === 金流 相關設定 ===
 MERCHANT_ID   = os.getenv("MERCHANT_ID", "")
 TERMINAL_ID   = os.getenv("TERMINAL_ID", "")
@@ -170,6 +198,455 @@ class LineAuth:
                 raise HTTPException(400, f"Profile error: {prof.text}")
             profile = prof.json()
         return token, profile
+
+# === Main Route 流程 ===
+class TaiwanHolidayChecker:
+    def __init__(self):
+        # 使用 holidays 套件初始化台灣假日表
+        self.holidays = holidays.TW()
+
+    def now_datetime(self):
+        # 回傳目前時間（台北時區假設為系統當地時間）
+        return datetime.now()
+
+    def is_holiday(self, date=None):
+        """
+        判定給定日期是否為假日。
+        如果 date 為 None，則使用今天。
+        返回 True (假日) 或 False (非假日)。
+        假日定義：在 holidays.TW 假日清單中 或 星期六／星期日。
+        """
+        if date is None:
+            date = self.now_datetime().date()
+
+        # 星期六(5)或星期日(6)
+        if date.weekday() >= 5:
+            return True
+
+        # 是否為國定假日（假日套件中有記錄）
+        if date in self.holidays:
+            return True
+
+        return False
+
+    def display(self):
+        """顯示今天是否為假日"""
+        now = self.now_datetime()
+        date_str = now.strftime("%Y-%m-%d")
+        time_str = now.strftime("%H:%M:%S")
+        holiday_flag = self.is_holiday(now.date())
+        # print(f"現在時間：{date_str} {time_str}")
+        if holiday_flag:
+            return("假日")
+        else:
+            return("工作日")
+
+    def display_input(self, days_test):
+        """讓使用者輸入日期來測試"""
+        user_input = days_test.strip()
+        if user_input:
+            try:
+                test_date = datetime.strptime(user_input, "%Y-%m-%d").date()
+            except ValueError:
+                print("⚠️ 日期格式錯誤，請輸入 YYYY-MM-DD")
+                return
+        else:
+            test_date = self.now_datetime().date()
+
+        holiday_flag = self.is_holiday(test_date)
+        # print(f"測試日期：{test_date}")
+        if holiday_flag:
+            return("假日")
+        else:
+            return("工作日")
+
+class Route_Processing():
+    """邏輯：先有所有路線，顯示各站資訊，跟車輛動態無關，接著根據排程更新車輛資訊"""
+    def __init__(self):
+        checker = TaiwanHolidayChecker()
+        self.Today = checker.display()
+        self.now_time = datetime.now().time()
+        # self.Today = checker.display_input("2025-01-02")
+        # self.now_time = datetime.strptime("13:29", "%H:%M").time()
+        print(f"=== DeBUG {self.Today}{self.now_time}")
+
+        self.All_Route = None
+        self.All_Schedual = None
+        print("初始化完成")
+
+    # ======================================================
+    # 🔧 工具工具工具區（Utility Functions）
+    # ======================================================
+    def map_direction(self, d):
+        # 統一方向
+        if d in ["返程", "回程"]:
+            return "回程"
+        return "去程"
+
+    def to_float(self, x):
+        if isinstance(x, Decimal):
+            return float(x)
+        return float(x)
+
+    def validate_and_fix_latlon(self, lat, lon):
+        """
+        自動修正常見經緯度錯誤：
+        - Decimal → float
+        - 交換 lat/lon（顛倒）
+        - 非台灣區域 → 回傳 None
+        """
+        lat, lon = self.to_float(lat), self.to_float(lon)
+
+        if lat is None or lon is None:
+            return None, None, "invalid_number"
+
+        # --- Step 1: 若緯度不在 -90~90 / 經度不在 -180~180 → 一定有問題
+        if abs(lat) > 90 or abs(lon) > 180:
+            # 嘗試交換
+            lat, lon = lon, lat
+
+        # --- Step 2: 再檢查一次合理範圍
+        if abs(lat) > 90 or abs(lon) > 180:
+            return None, None, "invalid_range"
+
+        # --- Step 3: 台灣範圍檢查 ---
+        in_tw = (21.5 <= lat <= 25.5) and (119.0 <= lon <= 123.0)
+
+        return lat, lon, ("ok" if in_tw else "outside_tw")
+
+    def normalize_direction(self, x):
+        t = str(x or "").strip()
+        if "返" in t or "回" in t or t == "1":
+            return "回程"
+        return "去程"
+
+    def haversine_km(self, lat1, lon1, lat2, lon2):
+        # --- 自動修正經緯度 ---
+        lat1, lon1, _ = self.validate_and_fix_latlon(lat1, lon1)
+        lat2, lon2, _ = self.validate_and_fix_latlon(lat2, lon2)
+
+        if lat1 is None or lat2 is None:
+            return None  # 不能計算距離
+
+        # --- Haversine ---
+        R = 6371.0  # 地球半徑（公里）
+        phi1, phi2 = math.radians(lat1), math.radians(lat2)
+        dphi = math.radians(lat2 - lat1)
+        dlambda = math.radians(lon2 - lon1)
+
+        a = math.sin(dphi / 2) ** 2 + math.cos(phi1) * math.cos(phi2) * math.sin(dlambda / 2) ** 2
+        d = 2 * R * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+        return d
+    # ======================================================
+    # 🕒 時間 / 排程工具（Schedule Utils）
+    # ======================================================
+    def next_bus_from_schedule(self, schedule, status="正常營運"):
+        # 1️⃣ 車輛非正常營運：整條都視為未發車
+        if status != "正常營運":
+            return "未發車"
+        
+        # 2️⃣ 行程表為空
+        if not schedule or schedule == "None":
+            return "未發車"
+
+        # 3️⃣ 分割行程表
+        times = [t.strip() for t in schedule.split(",") if t.strip()]
+
+        for t in times:
+            sched_time = datetime.strptime(t, "%H:%M").time()
+            if sched_time > self.now_time:
+                return sched_time.strftime("%H:%M")
+
+        # 4️⃣ 全部班次都已過 → 末班已發
+        return "末班已發"
+        
+    def Search_All_Route(self):
+        """各路線顯示（展開去程/回程）"""
+
+        Total = MySQL_Doing.run("select * from bus_routes_total where status = 1")
+        Total = Total[["route_id", "route_name", "direction"]]
+        return Total
+    
+    # def Search_All_Schedual(self):
+    #     """車輛狀態顯示"""
+    #     All_schedual = MySQL_Doing.run("select * from route_schedule where operation_status = '正常營運'")
+    #     All_schedual = All_schedual[["route_no", "direction","license_plate","operation_status", "vehicle_status"]]
+    #     return All_schedual
+
+    def Search_All_Schedual(self):
+        """車輛狀態顯示 + 加入GIS座標"""
+        All_schedual = MySQL_Doing.run("""
+            select route_no, direction, license_plate, operation_status, vehicle_status
+            from route_schedule
+            where operation_status = '正常營運'
+        """)
+
+        # 先加欄位
+        All_schedual["X"] = "NONE"
+        All_schedual["Y"] = "NONE"
+
+        for index, row in All_schedual.iterrows():
+            plate = row["license_plate"]
+            status = row["vehicle_status"]
+
+            if status == "on_duty":
+                Car_GIS = Route_Processing.Search_ForGIS(plate)
+
+                # ---- 防呆：None 或空資料 ----
+                if Car_GIS is None or len(Car_GIS) == 0:
+                    continue
+
+                # ---- 防呆：欄位不存在 ----
+                if "X" not in Car_GIS.columns or "Y" not in Car_GIS.columns:
+                    continue
+
+                # ---- 寫回 DataFrame ----
+                try:
+                    All_schedual.at[index, "X"] = Car_GIS["X"].iloc[0]
+                    All_schedual.at[index, "Y"] = Car_GIS["Y"].iloc[0]
+                except:
+                    # 任何例外也補上 NONE (保險)
+                    All_schedual.at[index, "X"] = "NONE"
+                    All_schedual.at[index, "Y"] = "NONE"
+
+        return All_schedual
+
+    def Search_Original_Stations(self, route_id, direction):
+        Stop = MySQL_Doing.run(f"""
+        select * from bus_route_stations 
+        where route_id = {route_id} and direction = '{direction}'
+        """)
+        return Stop
+
+    def Search_Stop_Stations(self, route_id, direction, status="正常營運"):
+        Stop = MySQL_Doing.run(f"""
+        select * from bus_route_stations 
+        where route_id = {route_id} and direction = '{direction}'
+        """)
+        # ⭐ 若沒有站點 → 回傳空白模板（防止 KeyError）
+        if Stop is None or Stop.empty:
+            return pd.DataFrame({
+                "route_id": [],
+                "direction": [],
+                "stop_name": [],
+                "latitude": [],
+                "longitude": [],
+                "Next_Stop": []
+            })
+
+        # ⭐ 決定 schedule 欄位
+        raw_col = "schedule" if self.Today == "工作日" else "schedule2"
+
+        # ⭐ schedule 欄位不存在 → 全部視為未發車
+        if raw_col not in Stop.columns:
+            Stop["Next_Stop"] = "未發車"
+        else:
+            # 統一將 "None" → 空白
+            Stop[raw_col] = Stop[raw_col].replace("None", "")
+            Stop["Next_Stop"] = Stop[raw_col].apply(
+                lambda s: self.next_bus_from_schedule(s, status)
+            )
+
+        # ⭐ 保證欄位存在才回傳
+        return Stop[[
+            "route_id",
+            "direction",
+            "stop_name",
+            "latitude",
+            "longitude",
+            "Next_Stop"
+        ]]
+
+    def Search_Carinfor(self, Station, GIS, vehicle_status='rest'):
+        # 沒站資料 → 回傳空
+        if Station is None or Station.empty:
+            return Station
+
+        # 休息狀態：直接回傳 next stop
+        if vehicle_status == "rest":
+            df = Station.copy()
+            df["distance_km"] = None
+            df["車子所在位置"] = df["Next_Stop"]
+            return df
+
+        # 🚫 沒 GPS 資料 → 未定位
+        if GIS is None or GIS.empty:
+            df = Station.copy()
+            df["distance_km"] = None
+            df["車子所在位置"] = "未定位"
+            return df
+
+        # 🚫 GPS X/Y 是 None → 未定位
+        X = GIS["X"].iloc[0]
+        Y = GIS["Y"].iloc[0]
+
+        if X is None or Y is None:
+            df = Station.copy()
+            df["distance_km"] = None
+            df["車子所在位置"] = "未定位"
+            return df
+
+        # 🚫 GPS 轉 float 失敗 → 未定位
+        try:
+            car_lat = self.to_float(Y)
+            car_lon = self.to_float(X)
+        except:
+            df = Station.copy()
+            df["distance_km"] = None
+            df["車子所在位置"] = "未定位"
+            return df
+
+        # ========= 正常車輛定位流程 =========
+        df = Station.copy()
+
+        df["distance_km"] = df.apply(
+            lambda row: self.haversine_km(
+                car_lat, car_lon,
+                row["latitude"], row["longitude"]
+            ),
+            axis=1
+        )
+
+        # 全 None → GPS 異常
+        if df["distance_km"].isna().all():
+            df["車子所在位置"] = "未定位"
+            return df
+
+        nearest_idx = df["distance_km"].idxmin()
+
+        df["車子所在位置"] = ""
+
+        cumulative_min = 0
+        speed = 40  # km/h
+        used_coming = False  # ⭐ 是否已使用「即將進站」
+
+        for idx, row in df.iterrows():
+
+            if idx < nearest_idx:
+                df.at[idx, "車子所在位置"] = str(row["Next_Stop"])
+
+            elif idx == nearest_idx:
+                df.at[idx, "車子所在位置"] = "當班"
+
+            else:
+                dist = row["distance_km"]
+                t_min = (dist / speed) * 60
+                cumulative_min += t_min
+
+                minutes = round(cumulative_min)
+
+                if minutes == 0:
+                    if not used_coming:
+                        df.at[idx, "車子所在位置"] = "即將進站"
+                        used_coming = True
+                    else:
+                        df.at[idx, "車子所在位置"] = "1分鐘"
+                else:
+                    df.at[idx, "車子所在位置"] = f"{minutes}分鐘"
+
+        return df
+
+    def Search_ForGIS(self, Car_Licence):
+        GIS = MySQL_Doing.run(f"select * from ttcarimport where car_licence = '{Car_Licence}' order by seq desc limit 1")
+        return GIS
+        
+    def Processing(self):
+        routes = self.Search_All_Route()
+        schedules = self.Search_All_Schedual()
+
+        schedules["route_no"] = schedules["route_no"].astype(int)
+        routes["route_id"] = routes["route_id"].astype(int)
+
+        result_rows = []
+
+        # ===== ① 組合排班 =====
+        for _, row in routes.iterrows():
+            rid = row["route_id"]
+            rname = row["route_name"]
+            rdir = row["direction"]
+
+            target_dirs = ["去程"] if "單" in rdir else ["去程", "返程"]
+
+            for d2 in target_dirs:
+                match = schedules[
+                    (schedules["route_no"] == rid) &
+                    (schedules["direction"] == d2)
+                ]
+
+                if len(match) > 0:
+                    m = match.iloc[0]
+                    result_rows.append({
+                        "route_no": rid,
+                        "direction": d2,
+                        "license_plate": m["license_plate"],
+                        "operation_status": m["operation_status"],
+                        "vehicle_status": m["vehicle_status"],
+                        "X": m["X"],
+                        "Y": m["Y"]
+                    })
+                else:
+                    result_rows.append({
+                        "route_no": rid,
+                        "direction": d2,
+                        "license_plate": "無排班",
+                        "operation_status": "無排班",
+                        "vehicle_status": "無資料",
+                        "X": "NONE",
+                        "Y": "NONE"
+                    })
+
+        # ===== ② 車輛當前位置（計算 當班位置 欄位）=====
+        df_status = pd.DataFrame(result_rows)
+        df_status["當班位置"] = "NONE"
+
+        for idx, row in df_status.iterrows():
+            plate = row["license_plate"]
+            veh_status = row["vehicle_status"]
+            route_no = row["route_no"]
+            direction = row["direction"]
+
+            # 休息 → 當班位置 = NONE
+            if veh_status != "on_duty":
+                df_status.at[idx, "當班位置"] = "NONE"
+                continue
+
+            # on_duty → 用 Search_Stop_Stations + Search_Carinfor 取得「當班位置」
+            GIS = self.Search_ForGIS(plate)
+            STA = self.Search_Stop_Stations(
+                str(route_no),
+                Route_Processing.map_direction(direction),
+                row["operation_status"]
+            )
+            info = self.Search_Carinfor(STA, GIS, veh_status)
+
+            # 找出 "當班" 那一列
+            try:
+                pos = info[info["車子所在位置"] == "當班"]["stop_name"].iloc[0]
+                df_status.at[idx, "當班位置"] = pos
+            except:
+                df_status.at[idx, "當班位置"] = "NONE"
+
+        # ===== ③ 輸出路線+站點 =====
+        output_dict = {}
+        for _, row in df_status.iterrows():
+            rid = row["route_no"]
+            d2 = row["direction"]
+            key = f"{rid}-GO" if d2 == "去程" else f"{rid}-BACK"
+
+            GIS = self.Search_ForGIS(row["license_plate"])
+            STA = self.Search_Stop_Stations(
+                str(rid),
+                Route_Processing.map_direction(d2),
+                row["operation_status"]
+            )
+            stationCarinfor = self.Search_Carinfor(STA, GIS, row["vehicle_status"])
+
+            output_dict[key] = stationCarinfor
+
+        # ===== ④ ⭐ 最終加上 All_Status =====
+        output_dict["All_Status"] = df_status
+
+        return output_dict
 
 # === Helper: return_to 安全檢查 ===
 def _is_safe_return_to(url: str) -> bool:
@@ -273,10 +750,13 @@ def normalize_direction(x):
 
 # ========== 全域設定 ==========
 TZ_NAME = os.getenv("TZ", "Asia/Taipei")
+TZ = ZoneInfo(TZ_NAME)
 MAIL_SEND_HOUR = int(os.getenv("MAIL_SEND_HOUR", "8"))
 MAIL_SEND_MIN = int(os.getenv("MAIL_SEND_MIN", "0"))
-TZ = ZoneInfo(TZ_NAME)
 
+# ====================================
+# Gmail Letter
+# ====================================
 # ========== 信件樣板 ==========
 MAIL_SUBJECT = "【乘車提醒】您今日的預約資訊"
 MAIL_TEXT_TEMPLATE = """親愛的乘客您好，
@@ -288,6 +768,7 @@ MAIL_TEXT_TEMPLATE = """親愛的乘客您好，
 
 — 花蓮小巴預約系統
 """
+
 # ========== 郵件發送 ==========
 def send_email(receiver_email: str, subject: str, text: str):
     message = MIMEMultipart("alternative")
@@ -299,6 +780,7 @@ def send_email(receiver_email: str, subject: str, text: str):
     with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
         server.login(SENDER_EMAIL, SENDER_PASS)
         server.sendmail(SENDER_EMAIL, receiver_email, message.as_string())
+
 # ========== 查詢今天預約 & 準備寄信名單 ==========
 def fetch_today_reservations() -> pd.DataFrame:
     sql = """
@@ -319,6 +801,7 @@ def fetch_today_reservations() -> pd.DataFrame:
     """
     rows = MySQL_Doing.run(sql)
     return pd.DataFrame(rows)
+
 # ========== 組信內容（依 email 彙整多筆預約） ==========
 def build_and_send_emails():
     now = datetime.now(TZ)
@@ -358,21 +841,59 @@ def build_and_send_emails():
 # ========== 排程器啟動 ==========
 def start_scheduler():
     scheduler = BackgroundScheduler(timezone=TZ)
+    # === 你的每日寄信任務 ===
     scheduler.add_job(
         build_and_send_emails,
         CronTrigger(hour=MAIL_SEND_HOUR, minute=MAIL_SEND_MIN, timezone=TZ),
         id="daily_send",
         replace_existing=True
     )
+     # === 新增：每 30 秒更新資料 ===
+    scheduler.add_job(
+        update_route_cache,
+        trigger='interval',
+        seconds=30,
+        id="route_cache",
+        replace_existing=True
+    )
+
     scheduler.start()
     app.state.scheduler = scheduler
-    print(f"[scheduler] started — will send emails daily at {MAIL_SEND_HOUR:02d}:{MAIL_SEND_MIN:02d} ({TZ_NAME})")
+    # print(f"[scheduler] started — will send emails daily at {MAIL_SEND_HOUR:02d}:{MAIL_SEND_MIN:02d} ({TZ_NAME})")
+    print(f"[scheduler] started — daily email + 30 sec route cache running")
 
+    # sched = getattr(app.state, "scheduler", None)
+    # if sched:
+    #     sched.shutdown()
+    #     print("[scheduler] stopped")
 
-    sched = getattr(app.state, "scheduler", None)
-    if sched:
-        sched.shutdown()
-        print("[scheduler] stopped")
+# ====================================
+# Route Setting
+# ====================================
+Route_Processing = Route_Processing()
+app.state.Total_Route = None
+app.state.Schedule_Route = None
+app.state.Process_Route = None
+
+def update_route_cache(): 
+    print("[Task] Updating route cache...") 
+    try: 
+        app.state.Total_Route = Route_Processing.Search_All_Route() 
+        app.state.Schedule_Route = Route_Processing.Search_All_Schedual() 
+        app.state.Process_Route = Route_Processing.Processing() 
+
+        checker = TaiwanHolidayChecker()
+        Route_Processing.Today = checker.display()
+        Route_Processing.now_time = datetime.now().time()
+        print("[Task] Cache updated successfully.") 
+        print(Route_Processing.Today, Route_Processing.now_time)
+        # print(app.state.Total_Route)
+        # print(app.state.Schedule_Route)
+        # print(app.state.Process_Route)
+    except Exception as e: 
+        print("[Task] ERROR:", e)
+        
+update_route_cache()
 
 @app.on_event("startup")
 def on_startup():
@@ -391,27 +912,46 @@ def healthz():
     """用於監控或負載平衡器的健康檢查端點"""
     return {"status": "error 404"}
 
-@api.get("/All_Route", tags=["Client"], summary="所有路線")
-def All_Route():
-    rows = MySQL_Doing.run("SELECT * FROM bus_routes_total")
+# @api.get("/All_Route", tags=["Client"], summary="所有路線")
+# def All_Route():
+#     rows = MySQL_Doing.run("SELECT * FROM bus_routes_total")
 
-    df_cols = MySQL_Doing.run("SHOW COLUMNS FROM bus_routes_total")
-    columns = df_cols["Field"].tolist()
+#     df_cols = MySQL_Doing.run("SHOW COLUMNS FROM bus_routes_total")
+#     columns = df_cols["Field"].tolist()
 
-    df = pd.DataFrame(rows, columns=columns)
+#     df = pd.DataFrame(rows, columns=columns)
 
-    if "created_at" in df.columns:
-        df["created_at"] = pd.to_datetime(df["created_at"], errors="coerce") \
-            .apply(lambda x: x.to_pydatetime() if pd.notnull(x) else None)
+#     if "created_at" in df.columns:
+#         df["created_at"] = pd.to_datetime(df["created_at"], errors="coerce") \
+#             .apply(lambda x: x.to_pydatetime() if pd.notnull(x) else None)
 
-    records = df.where(pd.notnull(df), None).to_dict(orient="records")
-    return records
+#     records = df.where(pd.notnull(df), None).to_dict(orient="records")
+#     return records
 
-@api.post("/Route_Stations",
-    response_model=List[Define.StationOut],
-    tags=["Client"],
-    summary="所有站點"
-)
+@api.get("/Cache/Total_Route", tags=["Latest_Frontendonfor"], summary="Total_Route")
+def get_cache_total_route():
+    df = app.state.Total_Route
+    return [] if df is None else df.to_dict(orient="records")
+
+
+@api.get("/Cache/Schedule_Route", tags=["Latest_Frontendonfor"], summary="Schedule_Route")
+def get_cache_schedule_route():
+    df = app.state.Schedule_Route
+    return [] if df is None else df.to_dict(orient="records")
+
+
+@api.get("/Cache/Process_Route", tags=["Latest_Frontendonfor"], summary="Process_Route")
+def get_cache_process_route():
+    data = app.state.Process_Route
+    if data is None:
+        return {}
+
+    output = {}
+    for key, df in data.items():
+        output[key] = df.to_dict(orient="records")
+    return output
+
+@api.post("/Route_Stations", tags=["Client"], summary="Latest_Frontendonfor",response_model=List[Define.StationOut])
 def get_route_stations(q: Define.RouteStationsQuery):
     # === 建立查詢語句 ===
     sql = "SELECT * FROM bus_route_stations WHERE route_id = %s"
@@ -499,8 +1039,40 @@ def get_route_stations(q: Define.RouteStationsQuery):
     data: List[Define.StationOut] = [Define.StationOut(**r) for r in records]
     return data
 
-@api.get("/Route_ScheduleTime", tags=["Client"], summary="取得路線時刻表（僅以頭尾站決定當前班次）")
-def get_route_schedule_time(route_id: int, direction: str = None):
+@api.post("/update_vehicle_status", tags=["Latest_Frontendonfor"])
+async def update_vehicle_status(
+
+    route_no: int = Body(..., example=1),
+    direction: str = Body(..., example="去程"),
+    vehicle_status: str = Body(..., example="on_duty")
+
+):
+    # === 防呆 ===
+    if vehicle_status not in ["on_duty", "rest"]:
+        return {"ok": False, "message": "vehicle_status 必須是 on_duty 或 rest"}
+
+    sql = f"""
+        UPDATE route_schedule
+        SET vehicle_status = '{vehicle_status}'
+        WHERE route_no = {route_no}
+          AND direction = '{direction}'
+          AND operation_status = '正常營運'
+    """
+
+    try:
+        MySQL_Doing.run(sql)
+        return {
+            "ok": True,
+            "route_no": route_no,
+            "direction": direction,
+            "vehicle_status": vehicle_status,
+            "message": "更新成功"
+        }
+    except Exception as e:
+        return {"ok": False, "message": f"資料庫更新失敗: {e}"}
+
+# @api.get("/Route_ScheduleTime", tags=["Client"], summary="取得路線時刻表（僅以頭尾站決定當前班次）")
+# def get_route_schedule_time(route_id: int, direction: str = None):
     """
     只用「頭站與尾站」的時刻表決定當前班次索引 k：
       - 若 now <= head[k] 的第一個班次 → k 即為該索引
@@ -637,138 +1209,138 @@ def yo_hualien():
     df = pd.DataFrame(rows, columns=columns)
     return df.to_dict(orient="records") 
 
-@api.get("/GIS_About", tags=["Client"], summary="取得最新車輛資訊")
-def Get_GIS_About():
-    Results = MySQL_Doing.run("""
-    Select route from car_resource
-    where route != 'None'
-    """)
+# @api.get("/GIS_About", tags=["Client"], summary="取得最新車輛資訊")
+# def Get_GIS_About():
+#     Results = MySQL_Doing.run("""
+#     Select route from car_resource
+#     where route != 'None'
+#     """)
 
-    # print(Results["route"].tolist())
-    Results = MySQL_Doing.run("""
-    SELECT c.route, c.X, c.Y, c.direction, c.Current_Location
-    FROM car_backup c
-    JOIN (
-        SELECT route, MAX(seq) AS max_seq
-        FROM car_backup
-        WHERE route IN ('1', '2', '3')
-        GROUP BY route
-    ) t ON c.route = t.route AND c.seq = t.max_seq;
-    """)
-    return Results
+#     # print(Results["route"].tolist())
+#     Results = MySQL_Doing.run("""
+#     SELECT c.route, c.X, c.Y, c.direction, c.Current_Location
+#     FROM car_backup c
+#     JOIN (
+#         SELECT route, MAX(seq) AS max_seq
+#         FROM car_backup
+#         WHERE route IN ('1', '2', '3')
+#         GROUP BY route
+#     ) t ON c.route = t.route AND c.seq = t.max_seq;
+#     """)
+#     return Results
 
-@api.get("/GIS_AllFast", tags=["Client"], summary="今日正常營運路線即時摘要（30秒快取）")
-def gis_all_fast():
-    # print("=== [DEBUG] /GIS_AllFast 開始 ===")
+# @api.get("/GIS_AllFast", tags=["Client"], summary="今日正常營運路線即時摘要（30秒快取）")
+# def gis_all_fast():
+#     # print("=== [DEBUG] /GIS_AllFast 開始 ===")
 
-    # 1️⃣ 抓取今日正常營運車輛
-    df_routes = pd.DataFrame(MySQL_Doing.run('''
-        SELECT route_no, direction, license_plate 
-        FROM route_schedule 
-        WHERE operation_status = "正常營運"
-    '''))
-    if df_routes.empty:
-        print("[WARN] 無正常營運路線")
-        return {}
+#     # 1️⃣ 抓取今日正常營運車輛
+#     df_routes = pd.DataFrame(MySQL_Doing.run('''
+#         SELECT route_no, direction, license_plate 
+#         FROM route_schedule 
+#         WHERE operation_status = "正常營運"
+#     '''))
+#     if df_routes.empty:
+#         print("[WARN] 無正常營運路線")
+#         return {}
 
-    df_routes["direction"] = df_routes["direction"].map(normalize_direction)
-    # print(f"[DEBUG] 讀取 route_schedule 共 {len(df_routes)} 筆")
+#     df_routes["direction"] = df_routes["direction"].map(normalize_direction)
+#     # print(f"[DEBUG] 讀取 route_schedule 共 {len(df_routes)} 筆")
 
-    # 2️⃣ 讀取所有站點
-    df_stops = pd.DataFrame(MySQL_Doing.run('''
-        SELECT route_id, direction, latitude, longitude, stop_name 
-        FROM bus_route_stations
-    '''))
-    df_stops["direction"] = df_stops["direction"].map(normalize_direction)
-    # print(f"[DEBUG] 讀取 bus_route_stations 共 {len(df_stops)} 筆")
+#     # 2️⃣ 讀取所有站點
+#     df_stops = pd.DataFrame(MySQL_Doing.run('''
+#         SELECT route_id, direction, latitude, longitude, stop_name 
+#         FROM bus_route_stations
+#     '''))
+#     df_stops["direction"] = df_stops["direction"].map(normalize_direction)
+#     # print(f"[DEBUG] 讀取 bus_route_stations 共 {len(df_stops)} 筆")
 
-    results = []
+#     results = []
 
-    # 3️⃣ 每台車找最近站點
-    for _, r in df_routes.iterrows():
-        route_id = int(r["route_no"])
-        plate = str(r["license_plate"])
-        direction = r["direction"]
+#     # 3️⃣ 每台車找最近站點
+#     for _, r in df_routes.iterrows():
+#         route_id = int(r["route_no"])
+#         plate = str(r["license_plate"])
+#         direction = r["direction"]
 
-        # print(f"\n[DEBUG] 處理路線 {route_id}, 車牌 {plate}, 方向 {direction}")
+#         # print(f"\n[DEBUG] 處理路線 {route_id}, 車牌 {plate}, 方向 {direction}")
 
-        # --- 抓車機資料 ---
-        sql = f'''
-            SELECT 
-                X AS longitude,
-                Y AS latitude
-            FROM ttcarimport 
-            WHERE car_licence = "{plate}" 
-            ORDER BY seq DESC 
-            LIMIT 1
-        '''
-        df_car = pd.DataFrame(MySQL_Doing.run(sql))
-        # print(f"[DEBUG] 車牌 {plate} GPS 筆數: {len(df_car)}")
+#         # --- 抓車機資料 ---
+#         sql = f'''
+#             SELECT 
+#                 X AS longitude,
+#                 Y AS latitude
+#             FROM ttcarimport 
+#             WHERE car_licence = "{plate}" 
+#             ORDER BY seq DESC 
+#             LIMIT 1
+#         '''
+#         df_car = pd.DataFrame(MySQL_Doing.run(sql))
+#         # print(f"[DEBUG] 車牌 {plate} GPS 筆數: {len(df_car)}")
 
-        if df_car.empty:
-            print(f"[WARN] 車牌 {plate} 無最新位置，略過")
-            continue
+#         if df_car.empty:
+#             print(f"[WARN] 車牌 {plate} 無最新位置，略過")
+#             continue
 
-        # --- 經緯度轉換 + 檢查 ---
-        try:
-            car_lat = float(df_car.iloc[0]["latitude"])   # 緯度（應約23.x）
-            car_lon = float(df_car.iloc[0]["longitude"])  # 經度（應約121.x）
-        except Exception as e:
-            print(f"[ERROR] 無法轉換經緯度 ({plate}): {e}")
-            continue
+#         # --- 經緯度轉換 + 檢查 ---
+#         try:
+#             car_lat = float(df_car.iloc[0]["latitude"])   # 緯度（應約23.x）
+#             car_lon = float(df_car.iloc[0]["longitude"])  # 經度（應約121.x）
+#         except Exception as e:
+#             print(f"[ERROR] 無法轉換經緯度 ({plate}): {e}")
+#             continue
 
-        # 自動偵測經緯度是否顛倒
-        if abs(car_lat) > 90 or abs(car_lon) > 180:
-            print(f"[WARN] 座標顛倒 lat={car_lat}, lon={car_lon} → 交換")
-            car_lat, car_lon = car_lon, car_lat
+#         # 自動偵測經緯度是否顛倒
+#         if abs(car_lat) > 90 or abs(car_lon) > 180:
+#             print(f"[WARN] 座標顛倒 lat={car_lat}, lon={car_lon} → 交換")
+#             car_lat, car_lon = car_lon, car_lat
 
-        # 粗略檢查是否在台灣範圍內
-        if not (21.5 <= car_lat <= 25.5 and 119.0 <= car_lon <= 123.0):
-            print(f"[WARN] 座標異常 lat={car_lat}, lon={car_lon}")
+#         # 粗略檢查是否在台灣範圍內
+#         if not (21.5 <= car_lat <= 25.5 and 119.0 <= car_lon <= 123.0):
+#             print(f"[WARN] 座標異常 lat={car_lat}, lon={car_lon}")
 
-        # print(f"[DEBUG] 正常化後座標: lat={car_lat}, lon={car_lon}")
+#         # print(f"[DEBUG] 正常化後座標: lat={car_lat}, lon={car_lon}")
 
-        # --- 尋找相同路線、方向的站 ---
-        df_route_stops = df_stops.loc[
-            (df_stops["route_id"] == route_id) &
-            (df_stops["direction"] == direction)
-        ].copy()
+#         # --- 尋找相同路線、方向的站 ---
+#         df_route_stops = df_stops.loc[
+#             (df_stops["route_id"] == route_id) &
+#             (df_stops["direction"] == direction)
+#         ].copy()
 
-        # print(f"[DEBUG] 匹配站點數: {len(df_route_stops)}")
-        if df_route_stops.empty:
-            print(f"[WARN] 路線 {route_id} ({direction}) 無對應站點")
-            continue
+#         # print(f"[DEBUG] 匹配站點數: {len(df_route_stops)}")
+#         if df_route_stops.empty:
+#             print(f"[WARN] 路線 {route_id} ({direction}) 無對應站點")
+#             continue
 
-        # --- 計算距離 ---
-        try:
-            df_route_stops.loc[:, "distance_m"] = df_route_stops.apply(
-                lambda s: haversine(car_lat, car_lon, float(s["latitude"]), float(s["longitude"])),
-                axis=1
-            )
-        except Exception as e:
-            print(f"[ERROR] 計算距離失敗: {e}")
-            continue
+#         # --- 計算距離 ---
+#         try:
+#             df_route_stops.loc[:, "distance_m"] = df_route_stops.apply(
+#                 lambda s: haversine(car_lat, car_lon, float(s["latitude"]), float(s["longitude"])),
+#                 axis=1
+#             )
+#         except Exception as e:
+#             print(f"[ERROR] 計算距離失敗: {e}")
+#             continue
 
-        nearest_idx = df_route_stops["distance_m"].idxmin()
-        nearest = df_route_stops.loc[nearest_idx]
-        # print(f"[DEBUG] 最接近站點: {nearest['stop_name']} (距離 {nearest['distance_m']:.2f} 公尺)")
+#         nearest_idx = df_route_stops["distance_m"].idxmin()
+#         nearest = df_route_stops.loc[nearest_idx]
+#         # print(f"[DEBUG] 最接近站點: {nearest['stop_name']} (距離 {nearest['distance_m']:.2f} 公尺)")
 
-        # --- 輸出 ---
-        results.append({
-            "route": route_id,
-            "X": car_lon,      # 經度
-            "Y": car_lat,      # 緯度
-            "direction": direction,
-            "Current_Location": nearest["stop_name"]
-        })
+#         # --- 輸出 ---
+#         results.append({
+#             "route": route_id,
+#             "X": car_lon,      # 經度
+#             "Y": car_lat,      # 緯度
+#             "direction": direction,
+#             "Current_Location": nearest["stop_name"]
+#         })
 
-    # print(f"\n[DEBUG] 結果共 {len(results)} 筆")
-    # for i, r in enumerate(results):
-        # print(f"  [{i}] route={r['route']}, dir={r['direction']}, stop={r['Current_Location']}")
+#     # print(f"\n[DEBUG] 結果共 {len(results)} 筆")
+#     # for i, r in enumerate(results):
+#         # print(f"  [{i}] route={r['route']}, dir={r['direction']}, stop={r['Current_Location']}")
 
-    # print("=== [DEBUG] /GIS_AllFast 結束 ===\n")
+#     # print("=== [DEBUG] /GIS_AllFast 結束 ===\n")
 
-    return pd.DataFrame(results).to_dict()
+#     return pd.DataFrame(results).to_dict()
 
 @api.post("/reservation", tags=["Client"], summary="送出預約")
 def push_reservation(req: Define.ReservationReq):
@@ -874,54 +1446,54 @@ async def get_privacy():
     resp = requests.get(gist_url)
     return {"content": resp.text}
 
-@api.post("/car_backup_insert", tags=["Car"], summary="插入車輛備份資料")
-def insert_car_backup(data: Define.CarBackupInsert):
+# @api.post("/car_backup_insert", tags=["Car"], summary="插入車輛備份資料")
+# def insert_car_backup(data: Define.CarBackupInsert):
 
-    # 若未提供 rcv_dt，使用伺服器當前時間
-    rcv_dt = data.rcv_dt or datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+#     # 若未提供 rcv_dt，使用伺服器當前時間
+#     rcv_dt = data.rcv_dt or datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-    acc_value = "b'1'" if data.acc else "b'0'" if data.acc is not None else "NULL"
+#     acc_value = "b'1'" if data.acc else "b'0'" if data.acc is not None else "NULL"
 
-    sql = f"""
-    INSERT INTO car_backup (
-        rcv_dt, car_licence, Gpstime, X, Y, Speed, Deg, acc, route, direction, Current_Location
-    ) VALUES (
-        '{rcv_dt}', '{data.car_licence}', '{data.Gpstime}',
-        {data.X}, {data.Y}, {data.Speed}, {data.Deg},
-        {acc_value},
-        {f"'{data.route}'" if data.route else "NULL"},
-        {f"'{data.direction}'" if data.direction else "NULL"},
-        {f"'{data.Current_Location}'" if data.Current_Location else "NULL"}
-    );
-    """
+#     sql = f"""
+#     INSERT INTO car_backup (
+#         rcv_dt, car_licence, Gpstime, X, Y, Speed, Deg, acc, route, direction, Current_Location
+#     ) VALUES (
+#         '{rcv_dt}', '{data.car_licence}', '{data.Gpstime}',
+#         {data.X}, {data.Y}, {data.Speed}, {data.Deg},
+#         {acc_value},
+#         {f"'{data.route}'" if data.route else "NULL"},
+#         {f"'{data.direction}'" if data.direction else "NULL"},
+#         {f"'{data.Current_Location}'" if data.Current_Location else "NULL"}
+#     );
+#     """
 
-    try:
-        MySQL_Doing.run(sql)
-        return {"status": "success", "rcv_dt": rcv_dt, "sql": sql}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+#     try:
+#         MySQL_Doing.run(sql)
+#         return {"status": "success", "rcv_dt": rcv_dt, "sql": sql}
+#     except Exception as e:
+#         raise HTTPException(status_code=500, detail=str(e))
 
 
-    qr_text = str(data.get("qrcode", "")).strip()
-    if not qr_text:
-        raise HTTPException(status_code=400, detail="Empty QRCode")
+#     qr_text = str(data.get("qrcode", "")).strip()
+#     if not qr_text:
+#         raise HTTPException(status_code=400, detail="Empty QRCode")
 
-    try:
-        # 嘗試解密
-        decrypted = decrypt_aes(qr_text, KEY, IV)
-        obj = json.loads(decrypted)
+#     try:
+#         # 嘗試解密
+#         decrypted = decrypt_aes(qr_text, KEY, IV)
+#         obj = json.loads(decrypted)
 
-        rid = obj.get("reservation_id")
-        uid = obj.get("user_id")
-        lid = obj.get("line_id")
+#         rid = obj.get("reservation_id")
+#         uid = obj.get("user_id")
+#         lid = obj.get("line_id")
 
-        if not rid or not uid:
-            raise HTTPException(status_code=400, detail="Missing fields")
+#         if not rid or not uid:
+#             raise HTTPException(status_code=400, detail="Missing fields")
 
-        return {"status": "success", "data": obj}
+#         return {"status": "success", "data": obj}
 
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=f"QRCode decrypt failed: {e}")
+#     except Exception as e:
+#         raise HTTPException(status_code=400, detail=f"QRCode decrypt failed: {e}")
 
 @api.post("/car_insert", tags=["Car"], summary="插入車輛即時定位資料")
 def insert_car(data: Define.CarInsertRequest):
@@ -1237,32 +1809,21 @@ def create_boarding_qr(reservation_id: int, download: bool = False):
         buf.seek(0)
         return StreamingResponse(buf, media_type="image/png")
 
-
 @api.post("/boarding_qr/verify", tags=["Client"], summary="驗證乘車 QRCode")
 def verify_boarding_qr(data: Define.BoardingQRVerifyRequest):
-    """
-    驗證乘車 QR 編碼是否合法與是否具乘車資格。
-    會檢查 reservation.payment_status 與 review_status，
-    並回傳乘客資訊（user_id 對應 users 表）。
-    """
     token = data.qrcode.strip()
     if not token:
         raise HTTPException(status_code=400, detail="缺少 qrcode")
 
     result = verify_boarding_token(token)
-
     if not result.get("ok"):
         print("[DEBUG] verify_boarding_token 驗證失敗:", result)
         return {"status": "error", "reason": result.get("reason")}
 
-    print("[DEBUG] verify_boarding_token 驗證通過:", result)
-
-    # --- 從 token 取 reservation_id ---
     reservation_id = result.get("reservation_id") or result.get("data", {}).get("reservation_id")
     if not reservation_id:
         raise HTTPException(status_code=400, detail="找不到 reservation_id")
 
-    # --- 查 reservation 狀態 ---
     try:
         sql = f"SELECT * FROM reservation WHERE reservation_id = {int(reservation_id)};"
         df = MySQL_Doing.run(sql)
@@ -1272,11 +1833,20 @@ def verify_boarding_qr(data: Define.BoardingQRVerifyRequest):
         row = df.iloc[0].to_dict()
         payment_status = row.get("payment_status")
         review_status = row.get("review_status")
+        dispatch_status = row.get("dispatch_status")
         user_id = row.get("user_id")
 
-        print(f"[DEBUG] reservation 狀態: payment={payment_status}, review={review_status}, user_id={user_id}")
+        print(f"[DEBUG] reservation 狀態: payment={payment_status}, review={review_status}, dispatch={dispatch_status}, user_id={user_id}")
 
-        # === 檢查是否可乘車 ===
+        # === [新增] 檢查是否已上車 ===
+        if dispatch_status == "assigned":
+            return {
+                "status": "error",
+                "reason": "重複上車（此乘客已驗證過）",
+                "reservation_id": reservation_id
+            }
+
+        # === 檢查是否具乘車資格 ===
         if payment_status != "paid" or review_status != "approved":
             return {
                 "status": "error",
@@ -1317,6 +1887,10 @@ def verify_boarding_qr(data: Define.BoardingQRVerifyRequest):
         print(f"[ERROR] 驗證乘車資格時發生錯誤: {e}")
         raise HTTPException(status_code=500, detail=f"系統錯誤: {e}")
 
+# ====================================
+# 🔁 雷門 callback（伺服器對伺服器）
+# ====================================
+
 @app.post("/payments", response_model=Define.CreatePaymentOut)
 def create_payment(body: Define.CreatePaymentIn):
     import random
@@ -1325,8 +1899,10 @@ def create_payment(body: Define.CreatePaymentIn):
         raise HTTPException(status_code=400, detail="amount 必須為正整數")
 
     reservation_id = body.order_number  # 前端送進來的就是 reservation_id
-
-    pos_order_number = str(random.randint(10**10, 10**11 - 1))  # 11 位亂數，保證每次不同
+    random_code = str(random.randint(10**4, 10**5 - 1))  # 5 位隨機數
+    timestamp = datetime.now().strftime("%Y%m%d%H%M%S")  # 日期時間
+    pos_order_number = f"{STORE_CODE}{random_code}{timestamp}"
+    # pos_order_number = str(random.randint(10**10, 10**11 - 1))  # 11 位亂數，保證每次不同
     payload = {
         "set_price": str(amt),
         "pos_id": "01",
@@ -1350,10 +1926,6 @@ def create_payment(body: Define.CreatePaymentIn):
 
     return Define.CreatePaymentOut(pay_url=full_url, reservation_id=str(reservation_id))
 
-# ====================================
-# 🔁 雷門 callback（伺服器對伺服器）
-# ====================================
-
 @app.post("/callback")
 async def callback(request: Request):
     body = await request.json()
@@ -1370,8 +1942,8 @@ async def callback(request: Request):
         raise HTTPException(status_code=400, detail="Hash 驗證失敗")
 
     try:
-        KEY_bits = bytes.fromhex("3abae022acd6fc873821411c0b402c0fbe90d90bdda295ed15296f8ae465bf8b")  # 32 bytes
-        IV_bits  = bytes.fromhex("12fe9f5e0c3cc7c664894f19ba265050")  # 16 bytes
+        KEY_bits = bytes.fromhex(f"{KEY_HEX}")  # 32 bytes
+        IV_bits  = bytes.fromhex(f"{IV_HEX}")  # 16 bytes
 
         # KEY_bits = ''.join(format(b, '08b') for b in KEY.encode())
         # IV_bits = ''.join(format(b, '08b') for b in IV.encode())
@@ -1396,43 +1968,20 @@ async def callback(request: Request):
 def return_page():
     return RedirectResponse(url=f"{PUBLIC_BASE}?tab=reservations")
 
-# === 前端靜態檔案服務 ===
-
-# ------------------------------
+# ====================================
 # 新增：今日正常營運路線的即時摘要（30秒快取）
-# ------------------------------
+# ====================================
 _GIS_ALL_CACHE = {"ts": 0.0, "data": None}
 _GIS_ALL_TTL = 30  # seconds
 _GIS_ALL_LOCK = RLock()
-
-# app.include_router(api)
-# app.mount('/', StaticFiles(directory='dist', html=True), name='client')
-
-# # === FastAPI 把 API 跟前端打包 ===
-# @app.exception_handler(StarletteHTTPException)
-# async def spa_fallback(request: Request, exc: StarletteHTTPException):
-#     try:
-#         if exc.status_code == 404 and request.method in ("GET", "HEAD"):
-#             path = request.url.path or "/"
-#             accept = (request.headers.get("accept") or "").lower()
-#             # only for browser navigations to non-API paths
-#             if (
-#                 not path.startswith("/api")
-#                 and not path.startswith("/auth")
-#                 and ("text/html" in accept or accept == "*/*")
-#             ):
-#                 index_path = os.path.join("dist", "index.html")
-#                 if os.path.exists(index_path):
-#                     return FileResponse(index_path)
-#     except Exception:
-#         pass
-#     raise exc
 
 app.include_router(api)
 app.mount('/', StaticFiles(directory='dist', html=True), name='client')
 
 @app.exception_handler(StarletteHTTPException)
 async def spa_fallback(request: Request, exc: StarletteHTTPException):
+    if request.url.path.startswith(("/docs", "/redoc", "/openapi.json")):  #AAA
+        return await http_exception_handler(request, exc)  # 讓 FastAPI 自己處理 Basic Auth
     try:
         if exc.status_code == 404 and request.method in ("GET", "HEAD"):
             path = request.url.path or "/"
@@ -1453,5 +2002,4 @@ async def spa_fallback(request: Request, exc: StarletteHTTPException):
 docker compose down
 docker compose build
 docker compose up -d
-
 """

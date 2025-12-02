@@ -7,14 +7,14 @@ from dotenv import load_dotenv
 load_dotenv()
 
 Infor = {
-    "host": os.getenv("Host","127.0.0.1"),
+    "host": os.getenv("Host","localhost"),
     "user": os.getenv("User","root"),
-    "port": int(os.getenv("Port",3307)),
+    "port": int(os.getenv("Port",3308)),
     "password": os.getenv("Password_SQL",""),
     "database": os.getenv("Database",""),
 }
 
-db_path = os.getenv("SQLITE_PATH")
+#db_path = os.getenv("SQLITE_PATH")
 
 def init(Parameter):
     mydb = pymysql.connect(
@@ -47,7 +47,7 @@ def MySQL_Run(query, params=None, Parameter=Infor):
     mydb.close()
 
     return result
-
+'''
 def Sqlite_Run(query, db_path=db_path):
     try:
         with sqlite3.connect(db_path) as conn:
@@ -67,3 +67,4 @@ def Sqlite_Run(query, db_path=db_path):
         result = f"Error: {e}"
     
     return result
+'''

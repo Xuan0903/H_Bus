@@ -292,14 +292,14 @@ export default function ReservePage({ user, onRequireLogin }) {
             <div>
               <div className="muted small">站點 1（出發）</div>
               <select className="search-field" value={fromId} onChange={(e) => setFromId(e.target.value)}>
-                <option value="">請選擇</option>
+                <option value="">起點</option>
                 {stations.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
               </select>
             </div>
             <div>
               <div className="muted small">站點 2（到達）</div>
               <select className="search-field" value={toId} onChange={(e) => setToId(e.target.value)}>
-                <option value="">請選擇</option>
+                <option value="">迄點</option>
                 {stations.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
               </select>
             </div>
@@ -322,7 +322,7 @@ export default function ReservePage({ user, onRequireLogin }) {
                 onChange={(e) => setWhenTime(e.target.value)}
                 disabled={!whenDate}
               >
-                <option value="">請選擇</option>
+                <option value="">搭乘時間</option>
                 {generateTimeOptions(whenDate).map(t => <option key={t} value={t}>{t}</option>)}
               </select>
             </div>

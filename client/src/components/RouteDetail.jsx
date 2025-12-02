@@ -1,9 +1,8 @@
 ﻿import React, { useEffect, useMemo, useRef, useState } from 'react'
-import { getRouteStops, getCarPositions } from '../services/api'
-import { getRouteScheduleTime } from "../services/api"
-import haversine from 'haversine-distance';
+import { getRouteProcess } from '../services/api';
+import { getScheduleRoute } from '../services/api';
+
 import debounce from 'lodash.debounce'
-import dayjs from "dayjs"
 
 export default function RouteDetail({ route, onClose, highlightStop }) {
   const [selectedDir, setSelectedDir] = useState('去程')
@@ -18,109 +17,81 @@ export default function RouteDetail({ route, onClose, highlightStop }) {
   const [loadingCars, setLoadingCars] = useState(false)
   const [cars, setCars] = useState([])
 
-  // 定時刷新 tick
+  // Reloading
   useEffect(() => {
     const id = setInterval(() => setTick((t) => (t + 1) % 1_000_000), 15000)
     return () => clearInterval(id)
   }, [])
 
-  // 一進頁：等站點與車輛資料都載入完才解除初始載入
-  useEffect(() => {
-    let cancelled = false
-
-    async function loadAll() {
-      try {
-        setInitialLoading(true)
-        setLoading(true)
-        setLoadingCars(true)
-        setError(null)
-
-      // 同步抓取站點與車輛
-      const carData = await getCarPositions()
-      if (!cancelled) setCars(carData || [])
-      } catch (err) {
-        if (!cancelled) {
-          console.warn("初始載入失敗:", err)
-          setError("無法載入資料")
-          setStops([])
-        }
-      } finally {
-        if (!cancelled) {
-          setInitialLoading(false)   // ✅ 真正載完才解除
-          setLoading(false)
-          setLoadingCars(false)
-        }
-      }
-    }
-
-    loadAll()
-    return () => { cancelled = true }
-  }, [route, selectedDir])
-
-  // 抓取站點
   useEffect(() => {
     let cancelled = false
     if (!route?.id) return
 
-    Promise.all([
-      getRouteStops(route.id, selectedDir),          // 原本的 /Route_Stations
-      getRouteScheduleTime(route.id, selectedDir),   // 新的 /Route_ScheduleTime
-    ]).then(([stopsData, scheduleData]) => {
-      if (cancelled) return
+    async function load() {
+      try {
+        setLoading(true)
+        setError(null)
 
-    console.log("📡 stopsData from /Route_Stations:", stopsData)
-    console.log("🕒 scheduleData from /Route_ScheduleTime:", scheduleData)
+        const byDir = await getRouteProcess(route.id)   // 🔥 只吃快取 API
+        if (cancelled) return
 
-    const merged = stopsData.map(stop => {
-      const match = scheduleData.find(s => s.stop_name === stop.stopName)
-      return {
-        ...stop,
-        next_time: match?.next_time || null,
-        full_schedule: match?.full_schedule || null,
+        const dirKey = selectedDir
+        const rawStops = byDir[dirKey] || []
+        const allStatus = byDir.All_Status || []
+
+        // 設定該路線該方向的車輛（只有 on_duty 才畫）
+        // 🚍 直接從 Schedule_Route 取最新車輛位置
+        const carsRaw = await getScheduleRoute();
+
+        const carForThisRoute = carsRaw.filter(
+          c => Number(c.routeId) === Number(route.id) &&
+              c.direction === selectedDir
+        );
+
+        setCars(
+          carForThisRoute.map(c => ({
+            X: c.lng,
+            Y: c.lat,
+            direction: c.direction,
+            route: c.routeId
+          }))
+        );
+
+
+        const mapped = rawStops.map((row, idx) => ({
+          // 順序：如果後端未給 stop_order，就用 index
+          order: Number(row.stop_order ?? idx + 1),
+          stop_order: Number(row.stop_order ?? idx + 1),
+          name: row.stopName || row.stop_name,
+          stopName: row.stopName || row.stop_name,
+          latitude: Number(row.latitude),
+          longitude: Number(row.longitude),
+          carStatus: row.carStatus || row['車子所在位置'] || '',
+          nextStop: row.nextStop || row['Next_Stop'] || '',
+        }))
+
+        setStops(mapped)
+      } catch (err) {
+        if (!cancelled) {
+          console.warn('載入路線站點失敗:', err)
+          setError('無法載入路線站點資料')
+          setStops([])
+        }
+      } finally {
+        if (!cancelled) {
+          setLoading(false)
+          setInitialLoading(false)   // ⭐⭐ 加這行（非常重要）
+        }
       }
-    })
+    }
 
-    console.log("🚏 merged stops result:", merged)
-    setStops(merged)
-
-    })
-
-    return () => { cancelled = true }
+    load()
+    return () => {
+      cancelled = true
+    }
   }, [route, selectedDir])
 
 
-  // 抓取車輛位置
-  useEffect(() => {
-    let cancelled = false
-
-    // 防止太頻繁呼叫 API（3 秒內多次只會執行一次）
-    const fetchCars = debounce(async () => {
-      try {
-        setLoading(true)
-        const data = await getCarPositions()
-        if (!cancelled) {
-          setCars([...data])
-          setTick((t) => t + 1)
-        }
-      } catch (e) {
-        if (!cancelled) console.warn('載入即時車輛位置失敗', e)
-      } finally {
-        if (!cancelled) setLoading(false)
-      }
-    }, 3000)
-
-    // 初次載入 + 每 15 秒刷新
-    fetchCars()
-    const id = setInterval(fetchCars, 30000)
-
-    return () => {
-      cancelled = true
-      clearInterval(id)
-      fetchCars.cancel()
-    }
-  }, [])
-
-  // 靜態站點
   const list = useMemo(() => {
     if (!isStatic) return []
     return stations
@@ -136,156 +107,17 @@ export default function RouteDetail({ route, onClose, highlightStop }) {
       })
   }, [route, isStatic])
 
-  // 顯示的站點 + 車輛狀態
+  // 站點資訊
   const displayStops = useMemo(() => {
-    // === [新增] Debug + 自動班次時間判斷 ===
-    if (!("__FORCE_ALL_UNDEPARTED__" in window)) {
-      window.__FORCE_ALL_UNDEPARTED__ = false;
-    }
-    if (Object.getOwnPropertyDescriptor(window, "test")) {
-      delete window.test;
-    }
-    Object.defineProperty(window, "test", {
-      configurable: true,
-      get() {
-        window.__FORCE_ALL_UNDEPARTED__ = !window.__FORCE_ALL_UNDEPARTED__;
-        console.log(
-          "🚍 [DEBUG] 強制未發車：",
-          window.__FORCE_ALL_UNDEPARTED__ ? "啟用" : "關閉"
-        );
-        return "（強制未發車已" + (window.__FORCE_ALL_UNDEPARTED__ ? "啟用" : "關閉") + "）";
-      }
-    });
+    return (stops || []).map((s, idx) => ({
+      ...s,
+      order: s.order ?? s.stop_order ?? idx + 1,
+      name: s.name || s.stopName || `第${idx + 1}站`,
+      carStatus: s.carStatus || '',
+    }))
+  }, [stops])
 
-    // === 自動判斷班次時間 ===
-    let forceAllUndeparted = !!window.__FORCE_ALL_UNDEPARTED__;
-    const now = dayjs();
-
-    try {
-      const allTimes = (stops || [])
-        .flatMap(s => (s.full_schedule || "")
-          .split(",")
-          .map(t => dayjs(`${now.format("YYYY-MM-DD")} ${t.trim()}`, "YYYY-MM-DD HH:mm"))
-          .filter(t => t.isValid())
-        )
-        .sort((a, b) => a.valueOf() - b.valueOf());
-
-      const firstBus = allTimes[0];
-      const lastBus = allTimes[allTimes.length - 1];
-
-      if (firstBus && now.isBefore(firstBus)) {
-        console.log(
-          "🕕 現在時間早於首班車：",
-          firstBus.format("HH:mm"),
-          "目前時間：",
-          now.format("HH:mm")
-        );
-        forceAllUndeparted = true;
-      } else if (lastBus && now.isAfter(lastBus)) {
-        console.log(
-          "⛔ 現在時間已過末班車：",
-          lastBus.format("HH:mm"),
-          "目前時間：",
-          now.format("HH:mm")
-        );
-        forceAllUndeparted = true;
-      }
-    } catch (e) {
-      console.warn("班次時間檢查錯誤:", e);
-    }
-
-    // === 合併站點資料 ===
-    const unified = (isStatic ? list : stops).map((s, idx) => ({
-      name: s.stopName || s['站點'] || `第${idx + 1}站`,
-      order: Number(s.order ?? s['站次'] ?? (idx + 1)),
-      latitude: Number(s.latitude ?? s['去程緯度'] ?? s['緯度']),
-      longitude: Number(s.longitude ?? s['去程經度'] ?? s['經度']),
-      etaFromStart: s.etaFromStart ?? s['首站到此站時間'] ?? null,
-      etaToHere: s.etaToHere ?? null,
-      schedule: s.schedule || s['schedule'] || s['時刻表'] || "",
-      next_time: s.next_time || s['next_time'] || null,
-      full_schedule: s.full_schedule || s['full_schedule'] || "",
-    }));
-
-    // === 找出車輛狀態 ===
-    const activeCars = cars.filter(c =>
-      String(c.route) === String(route.id) ||
-      String(c.route) === String(route.route_id) ||
-      String(c.route) === String(route.name)
-    );
-
-    const currentCar = activeCars.find(c => c.direction === selectedDir);
-    const carToUse = currentCar || activeCars[0] || null;
-
-    // === 根據狀態生成顯示資料 ===
-    return unified.map((s, idx) => {
-      // 全域強制或時間判斷 → 全未發車
-      if (forceAllUndeparted) {
-        return { ...s, status: { label: "未發車", tone: "orange" } };
-      }
-
-      // 若沒有車輛資料 → 未發車
-      if (!carToUse) {
-        return { ...s, status: { label: "未發車", tone: "orange" } };
-      }
-
-      // 找出當前車位置
-      const currentIndex = unified.findIndex(st => st.name === carToUse.currentLocation);
-
-      if (idx === currentIndex) {
-        return { ...s, status: { label: "到站中", tone: "green" } };
-      }
-
-      if (idx > currentIndex) {
-        let totalSeconds = 0;
-        const speed = carToUse.Speed > 0 ? carToUse.Speed : 30;
-
-        for (let i = currentIndex; i < idx; i++) {
-          const curStop = unified[i];
-          const nextStop = unified[i + 1];
-          if (!nextStop) continue;
-
-          const lat1 = Number(curStop.latitude);
-          const lon1 = Number(curStop.longitude);
-          const lat2 = Number(nextStop.latitude);
-          const lon2 = Number(nextStop.longitude);
-
-          if ([lat1, lon1, lat2, lon2].every(Number.isFinite)) {
-            const distM = haversine({ lat: lat1, lon: lon1 }, { lat: lat2, lon: lon2 });
-            totalSeconds += distM / (speed * 1000 / 3600);
-          }
-        }
-
-        if (idx === currentIndex + 1 && totalSeconds <= 60) {
-          return { ...s, status: { label: "即將到站", tone: "blue" } };
-        }
-
-        const minutes = Math.max(1, Math.round(totalSeconds / 60));
-        return { ...s, status: { label: `預估 ${minutes} 分鐘後抵達`, tone: "blue" } };
-      }
-
-      // 一般班次：顯示下一班時間
-      const scheduleStr = s.full_schedule || s.schedule || "";
-      const times = scheduleStr
-        .split(",")
-        .map(t => {
-          const parsed = dayjs(`${now.format("YYYY-MM-DD")} ${t.trim()}`, "YYYY-MM-DD HH:mm");
-          return parsed.isValid() ? parsed : null;
-        })
-        .filter(Boolean)
-        .sort((a, b) => a.valueOf() - b.valueOf());
-
-      const next = times.find(t => t.isAfter(now)) || (s.next_time
-        ? dayjs(`${now.format("YYYY-MM-DD")} ${s.next_time}`, "YYYY-MM-DD HH:mm")
-        : null);
-
-      const nextLabel = next ? next.format("HH:mm") : null;
-      const label = nextLabel ? `下一班時間 ${nextLabel}` : "下一班時間 -";
-
-      return { ...s, status: { label, tone: "blue" } };
-    });
-  }, [isStatic, list, stops, cars, route.id, selectedDir]);
-
+  // 站點資訊
   const staticStopsForMap = useMemo(() => {
     if (!isStatic) return []
     return list.map((s, idx) => ({
@@ -299,6 +131,7 @@ export default function RouteDetail({ route, onClose, highlightStop }) {
       .sort((a, b) => (a.stop_order ?? 0) - (b.stop_order ?? 0))
   }, [isStatic, list])
 
+  // 站點資訊
   if (initialLoading) {
     return (
       <div className="route-detail-overlay" role="dialog" aria-modal="true">
@@ -310,44 +143,94 @@ export default function RouteDetail({ route, onClose, highlightStop }) {
     )
   }
   return (
-    
     <div className="route-detail-overlay" role="dialog" aria-modal="true">
       <div className="route-detail-panel">
-        <div className="panel-head">
-          <div>
-            <div className="route-title">{route.name}</div>
-            <div className="muted small">
-              {isStatic ? route.direction : selectedDir}
-            </div>
+
+        <div
+          className="route-detail-header"
+          style={{
+            textAlign: "center",
+            paddingTop: 10,
+            paddingBottom: 6,
+          }}
+        >
+          {/* 標題 */}
+          <div
+            style={{
+              fontSize: "30px",
+              fontWeight: "900",
+              color: "#111",
+              marginBottom: 8,
+            }}
+          >
+            {route.name}
           </div>
-          <div>
+
+          {/* 三顆按鈕 */}
+          <div
+            style={{
+              display: "flex",
+              justifyContent: "center",
+              gap: "12px",
+            }}
+          >
+            {/* 去程 / 回程切換 */}
             <button
               className="btn"
-              onClick={() => setViewMode(viewMode === 'list' ? 'map' : 'list')}
+              onClick={() => {
+                if (!isSingleDirection) {
+                  setSelectedDir(selectedDir === "去程" ? "回程" : "去程")
+                }
+              }}
+              disabled={isSingleDirection}
               style={{
-                marginRight: 8,
-                backgroundColor: viewMode === 'list' ? '#007bff' : '#ffa726',
-                color: '#fff'
+                backgroundColor: selectedDir === "去程" ? "#2563eb" : "#6b7280",
+                color: "#fff",
+                padding: "6px 16px",
+                borderRadius: 8,
+                fontSize: "15px",
+                fontWeight: 600,
               }}
             >
-              {viewMode === 'list' ? '地圖' : '列表'}
+              {selectedDir}
             </button>
-            <button className="btn btn-orange" onClick={onClose}>關閉</button>
+
+            {/* 地圖 / 時刻表切換 */}
+            <button
+              className="btn"
+              onClick={() => setViewMode(viewMode === "list" ? "map" : "list")}
+              style={{
+                backgroundColor: viewMode === "list" ? "#007bff" : "#6366f1",
+                color: "#fff",
+                padding: "6px 16px",
+                borderRadius: 8,
+                fontSize: "15px",
+                fontWeight: 600,
+              }}
+            >
+              {viewMode === "list" ? "地圖" : "時刻表"}
+            </button>
+
+            {/* 關閉 */}
+            <button
+              className="btn"
+              onClick={onClose}
+              style={{
+                backgroundColor: "#f97316",
+                color: "#fff",
+                padding: "6px 16px",
+                borderRadius: 8,
+                fontSize: "15px",
+                fontWeight: 600,
+              }}
+            >
+              關閉
+            </button>
           </div>
         </div>
 
         {!isStatic ? (
           <>
-            {!isSingleDirection && (
-              <div className="card" style={{ marginBottom: 12 }}>
-                <div className="card-body" style={{ display: 'flex', gap: 8, alignItems:'center' }}>
-                  <div className="muted small">方向</div>
-                  <button className={`btn ${selectedDir === '去程' ? 'btn-blue' : ''}`} onClick={() => setSelectedDir('去程')}>去程</button>
-                  <button className={`btn ${selectedDir === '回程' ? 'btn-blue' : ''}`} onClick={() => setSelectedDir('回程')}>回程</button>
-                </div>
-              </div>
-            )}
-
             {viewMode === 'map' ? (
               <RouteMap stops={stops} cars={cars} route={route} />
             ) : (
@@ -377,37 +260,46 @@ export default function RouteDetail({ route, onClose, highlightStop }) {
                     >
                       <div className="stop-left">
                         <div className="stop-name">{s.name}</div>
-                        <div className="muted small">
-                          第 {s.order ?? (idx + 1)} 站 • 首站起 {s.etaFromStart ?? '-'} 分鐘
-                        </div>
                       </div>
                       <div className="stop-right">
-                        <span
-                          className="muted small"
-                          style={{
-                            padding: '2px 8px',
-                            borderRadius: 12,
-                            background:
-                              s.status.tone === 'green'
-                                ? '#e7f7ec'
-                                : s.status.tone === 'orange'
-                                ? '#fff2e5'
-                                : s.status.tone === 'blue'
-                                ? '#eaf2ff'
-                                : '#f2f3f5',
-                            color:
-                              s.status.tone === 'green'
-                                ? '#16794c'
-                                : s.status.tone === 'orange'
-                                ? '#a24a00'
-                                : s.status.tone === 'blue'
-                                ? '#1d4ed8'
-                                : '#6b7280',
-                            whiteSpace: 'nowrap',
-                          }}
-                        >
-                          {s.status.label}
-                        </span>
+                          {(() => {
+                            const txt = s.carStatus || ''
+                            let bg = '#eaf2ff'
+                            let color = '#1d4ed8'
+                            let label = txt
+
+                            if (txt === '當班') {
+                              bg = '#e7f7ec'
+                              color = '#16794c'
+                              label = '到站中'
+                            } else if (txt.includes('即將')) {
+                              bg = '#fff2e5'
+                              color = '#a24a00'
+                              label = '即將進站'
+                            } else if (/^\d+分/.test(txt)) {
+                              bg = '#eaf2ff'
+                              color = '#1d4ed8'
+                              label = `約${txt}`
+                            } else if (txt.includes('未發') || txt.includes('末班')) {
+                              bg = '#fde8e8'
+                              color = '#b91c1c'
+                            }
+
+                            return (
+                              <span
+                                className="muted small"
+                                style={{
+                                  padding: '2px 8px',
+                                  borderRadius: 12,
+                                  background: bg,
+                                  color: color,
+                                  whiteSpace: 'nowrap'
+                                }}
+                              >
+                                {label}
+                              </span>
+                            )
+                          })()}
                       </div>
                     </div>
                   )
@@ -427,9 +319,6 @@ export default function RouteDetail({ route, onClose, highlightStop }) {
                 <div key={idx} className="stop-item">
                   <div className="stop-left">
                     <div className="stop-name">{s.name}</div>
-                    <div className="muted small">
-                      第 {s.order ?? (idx + 1)} 站 • 首站起 {s.etaFromStart ?? '-'} 分鐘
-                    </div>
                   </div>
                   <div className="stop-right">
                     <span
@@ -470,6 +359,7 @@ export default function RouteDetail({ route, onClose, highlightStop }) {
   )
 }
 
+// 地圖資訊
 function useLeaflet() {
   const [ready, setReady] = useState(false)
   useEffect(() => {
@@ -507,7 +397,6 @@ function RouteMap({ stops, cars, route }) {
     layerBusRef.current = L.layerGroup().addTo(map)
   }, [ready])
 
-  // (A) 畫路線 + 站點，只在 stops 改變時觸發
   useEffect(() => {
     if (!ready || !mapRef.current) return
     const L = window.L
@@ -524,14 +413,12 @@ function RouteMap({ stops, cars, route }) {
 
     async function drawFullRoute() {
       if (llOriginal.length < 2) return
-      await import('leaflet-polylinedecorator')
-
-      let shapeCoords = route.shape // ← 後端 API 帶回來的完整 shape
-
+      let shapeCoords = route.shape // ← 後端 API 的完整 shape
       if (!shapeCoords || shapeCoords.length === 0) {
-        // fallback：一次丟全部站點給 OSRM
+        // fallback：用 OSRM 計算整條路線（如果後端沒有 shape）
         const coords = llOriginal.map(p => `${p[1]},${p[0]}`).join(";")
         const url = `https://router.project-osrm.org/route/v1/driving/${coords}?overview=full&geometries=geojson`
+
         try {
           const res = await fetch(url)
           const data = await res.json()
@@ -545,58 +432,99 @@ function RouteMap({ stops, cars, route }) {
       }
 
       if (shapeCoords && shapeCoords.length > 0) {
-        const stroke = L.polyline(shapeCoords, { color:'#2563eb', weight:7, opacity:.98 }).addTo(layerRouteRef.current)
-        if (L.polylineDecorator) {
-          L.polylineDecorator(stroke, {
-            patterns: [{ offset:0, repeat:'48px', symbol: L.Symbol.arrowHead({ pixelSize:11, pathOptions:{ color:'#2563eb', weight:6 } }) }]
-          }).addTo(layerRouteRef.current)
-        }
-        mapRef.current.fitBounds(stroke.getBounds(), { padding:[30,30] })
+        const stroke = L.polyline(shapeCoords, {
+          color: '#2563eb',
+          weight: 7,
+          opacity: 0.98
+        }).addTo(layerRouteRef.current)
+
+        mapRef.current.fitBounds(stroke.getBounds(), { padding: [30, 30] })
       }
     }
-
-
     drawFullRoute()
 
-    // 畫站點
-    const icon = (label, cls='') => L.divIcon({
-      className:'',
-      html:`<div class="stop-badge ${cls}">${label}</div>`,
-      iconSize:[24,24], iconAnchor:[12,12]
+    const icon = (label, cls = '') => L.divIcon({
+      className: '',
+      html: `
+        <div class="stop-badge ${cls}" style="
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          width: auto;
+          min-width: 28px;
+          height: 28px;
+          padding: 0 6px;
+          border-radius: 50%;
+          background: #2563eb;
+          border: 2px solid #ffffff;
+          color: #ffffff;
+          font-weight: 700;
+          font-size: 13px;
+          font-family: Arial, Helvetica, sans-serif;
+          text-align: center;
+          white-space: nowrap;
+          line-height: 0;           /* 防止上下分行 */
+          transform: translateY(0); /* 避免被 Leaflet 壓偏 */
+          box-shadow: 0 0 4px rgba(0,0,0,0.4);
+        ">
+          <span style="display:inline-block; line-height:1;">${label}</span>
+        </div>
+      `,
+      iconSize: null,
+      iconAnchor: [14, 14],
     })
+
     ordered.forEach((s, idx) => {
       const p = llOriginal[idx]; if (!p) return
       const isFirst = idx===0, isLast = idx===ordered.length-1
-      const label = isFirst ? 'S' : (s.order ?? s.stop_order ?? idx+1)
+      const label = isFirst ? '1' : (s.order ?? s.stop_order ?? idx+1)
       const cls = isFirst ? 'stop-start' : (isLast ? 'stop-end' : '')
       L.marker(p, { icon: icon(label, cls) }).addTo(stopLayer).bindTooltip(`${s.stopName || s.stop_name || '站點'}`, { direction:'top' })
     })
   }, [ready, stops])
-
-  // (B) 畫公車，只在 cars 改變時觸發
+    
   useEffect(() => {
     if (!ready || !mapRef.current) return
     const L = window.L
     const busLayer = layerBusRef.current
     busLayer.clearLayers()
 
-    cars.filter(c =>
-      String(c.route) === String(route.id) ||
-      String(c.route) === String(route.route_id) ||
-      String(c.route) === String(route.name)
-    ).forEach(car => {
+    // cars = [{X, Y, direction, route}]
+    cars.forEach(car => {
+      if (!car.X || !car.Y) return
+
       const busPt = [car.Y, car.X]
-      const html = `
-        <div class="bus-wrap">
-          <div class="bus-pulse"></div>
-          <div class="bus-dot"></div>
-          <div class="bus-emoji">🚌</div>
-          <div class="bus-badge">${car.direction}</div>
-        </div>`
-      L.marker(busPt, { icon: L.divIcon({ className:'', html, iconSize:[1,1] }) }).addTo(busLayer)
-      L.circle(busPt, { radius:50, color:'#2563eb', weight:1, fillColor:'#2563eb', fillOpacity:.08 }).addTo(busLayer)
+
+      const iconHtml = `
+        <div style="
+          display:flex;
+          align-items:center;
+          justify-content:center;
+          width:32px;
+          height:32px;
+          border-radius:50%;
+          background:#2563eb;
+          border:2px solid #fff;
+          color:#fff;
+          font-size:18px;
+          font-weight:900;
+          box-shadow:0 0 6px rgba(0,0,0,0.3);
+        ">
+          🚌
+        </div>
+      `
+
+      const icon = L.divIcon({
+        className: '',
+        html: iconHtml,
+        iconSize: [32, 32],
+        iconAnchor: [16, 16],
+      })
+
+      L.marker(busPt, { icon }).addTo(busLayer)
     })
-  }, [ready, cars, route])
+  }, [ready, cars])
+
 
   return <div style={{ height:'60vh', borderRadius:12, overflow:'hidden' }} ref={elRef} />
 }

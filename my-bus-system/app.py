@@ -23,7 +23,9 @@ try:
     import redis  # redis-py
 except Exception:  # pragma: no cover
     redis = None
-
+import uvicorn
+import threading
+from filelock import FileLock
 # 設定台北時區
 TAIPEI_TZ = pytz.timezone('Asia/Taipei')
 
@@ -164,9 +166,9 @@ load_dotenv()
 # MySQL 資料庫設定
 DB_USER = os.getenv("User","root")
 DB_PASSWORD = os.getenv("Password_SQL","")
-DB_HOST = os.getenv("Host","127.0.0.1")
-DB_PORT = int(os.getenv("Port",3307))
-DB_NAME = os.getenv("Database","")
+DB_HOST = os.getenv("Host","localhost")
+DB_PORT = int(os.getenv("Port",3308))
+DB_NAME = os.getenv("Database","bus_system")
 DATABASE_URL = os.getenv(
     "DATABASE_URL",
     f"mysql+pymysql://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
@@ -1406,8 +1408,11 @@ def get_users(
     limit: int = 10,
     search: Optional[str] = None,
     status: Optional[str] = None,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    current_user: AdminUser = Depends(get_current_user)
 ):
+    # 檢查權限：只有 Super Admin 和 Admin 可以存取會員管理
+    _ensure_admin_or_super(db, current_user)
     # 基本查詢
     query = db.query(User)
     
@@ -1558,7 +1563,8 @@ def get_admin_users(
     search: Optional[str] = None,
     status: Optional[str] = None,
     order: Literal['asc', 'desc'] = 'desc',
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    current_user: AdminUser = Depends(get_current_user)
 ):
     """
     取得管理員用戶列表（支援分頁和搜尋）
@@ -1569,6 +1575,9 @@ def get_admin_users(
     - search: 搜尋關鍵字（搜尋用戶名）
     - status: 狀態篩選 (active, inactive)
     """
+    # 檢查權限：只有 Super Admin 和 Admin 可以存取管理員管理
+    _ensure_admin_or_super(db, current_user)
+    
     try:
         # 建立基本查詢
         query = db.query(AdminUser, AdminRole).join(
@@ -1883,7 +1892,12 @@ def root():
     }
 
 @app.get("/All_Route", response_model=List[Route])
-def All_Route():
+def All_Route(
+    db: Session = Depends(get_db),
+    current_user: AdminUser = Depends(get_current_user)
+):
+    # 檢查權限：所有角色都可以查看路線
+    _ensure_dispatcher_access(db, current_user, 'route')
     try:
         rows = MySQL_Run("SELECT * FROM bus_routes_total")
 
@@ -1921,7 +1935,7 @@ class RouteCreate(BaseModel):
     start_stop: Optional[str] = None
     end_stop: Optional[str] = None
     stop_count: Optional[int] = 0
-    status: Optional[int] = 1
+    status: Optional[int] = 0
 
 @app.post("/api/routes/create")
 def create_route(route: RouteCreate, current_user: AdminUser = Depends(get_current_user), db: Session = Depends(get_db)):
@@ -1931,7 +1945,7 @@ def create_route(route: RouteCreate, current_user: AdminUser = Depends(get_curre
 
         # 使用參數化查詢，避免 SQL 注入
         stop_count = int(route.stop_count or 0)
-        status = int(route.status or 1)
+        status = int(route.status if route.status is not None else 0)
 
         # direction 只能是 '單向' 或 '雙向'（bus_routes_total schema）
         direction_val = route.direction if route.direction in ('單向', '雙向') else None
@@ -2108,7 +2122,13 @@ def delete_route(req: RouteDelete, current_user: AdminUser = Depends(get_current
         raise HTTPException(status_code=500, detail=f"刪除路線失敗: {str(e)}")
 
 @app.post("/Route_Stations", response_model=List[StationOut])
-def get_route_stations(q: RouteStationsQuery):
+def get_route_stations(
+    q: RouteStationsQuery,
+    db: Session = Depends(get_db),
+    current_user: AdminUser = Depends(get_current_user)
+):
+    # 檢查權限：所有角色都可以查看站點
+    _ensure_dispatcher_access(db, current_user, 'route')
     # --- 參數化查詢（你的 MySQL_Run 若支援 params，優先這個寫法） ---
     sql = "SELECT * FROM bus_route_stations WHERE route_id = %s"
     params = [q.route_id]
@@ -2517,7 +2537,12 @@ def delete_route_station(route_id: int, stop_order: int, current_user: AdminUser
         raise HTTPException(status_code=500, detail=f"刪除站點失敗: {str(e)}")
 
 @app.get("/api/routes")
-def get_all_routes():
+def get_all_routes(
+    db: Session = Depends(get_db),
+    current_user: AdminUser = Depends(get_current_user)
+):
+    # 檢查權限：所有角色都可以查看路線
+    _ensure_dispatcher_access(db, current_user, 'route')
     """獲取所有路線（從 bus_route_stations 表中提取）"""
     try:
         # 從 bus_route_stations 表中獲取所有不同的路線名稱和對應的 route_id
@@ -2673,6 +2698,31 @@ def _ensure_admin_or_super(db: Session, current_user: AdminUser):
     if not role or (role.role_name or '').lower() not in ('super_admin', 'admin'):
         raise HTTPException(status_code=403, detail='沒有權限執行此操作')
 
+def _ensure_dispatcher_access(db: Session, current_user: AdminUser, required_permission: str):
+    """
+    檢查 Dispatcher 是否有特定模組的權限
+    allowed_permissions: reservation, car, route, schedule
+    """
+    role = get_role_by_id(db, current_user.role_id)
+    if not role:
+        raise HTTPException(status_code=403, detail='角色不存在')
+    
+    role_name = (role.role_name or '').lower()
+    
+    # Super Admin 和 Admin 有所有權限
+    if role_name in ('super_admin', 'admin'):
+        return
+    
+    # Dispatcher 只能存取特定模組
+    if role_name == 'dispatcher':
+        allowed_permissions = ['reservation', 'car', 'route', 'schedule']
+        if required_permission not in allowed_permissions:
+            raise HTTPException(status_code=403, detail='Dispatcher 沒有權限存取此模組')
+        return
+    
+    # 其他角色拒絕存取
+    raise HTTPException(status_code=403, detail='沒有權限執行此操作')
+
 @app.get("/api/reservations")
 def list_reservations(
     page: int = 1,
@@ -2681,8 +2731,12 @@ def list_reservations(
     payment_status: Optional[str] = None,
     review_status: Optional[str] = None,
     dispatch_status: Optional[str] = None,
-    order: Literal['asc', 'desc'] = 'desc'
+    order: Literal['asc', 'desc'] = 'desc',
+    db: Session = Depends(get_db),
+    current_user: AdminUser = Depends(get_current_user)
 ):
+    # 檢查權限：Super Admin、Admin 和 Dispatcher 都可以存取預約管理
+    _ensure_dispatcher_access(db, current_user, 'reservation')
     try:
         cond = []
         params: List = []
@@ -2738,7 +2792,7 @@ def list_reservations(
 
 @app.post("/api/reservations")
 def create_reservation(payload: ReservationCreate, current_user: AdminUser = Depends(get_current_user), db: Session = Depends(get_db)):
-    _ensure_admin_or_super(db, current_user)
+    _ensure_dispatcher_access(db, current_user, 'reservation')
     try:
         cols = []
         vals = []
@@ -2766,7 +2820,7 @@ def create_reservation(payload: ReservationCreate, current_user: AdminUser = Dep
 
 @app.put("/api/reservations/{reservation_id}")
 def update_reservation(reservation_id: int, payload: ReservationUpdate, current_user: AdminUser = Depends(get_current_user), db: Session = Depends(get_db)):
-    _ensure_admin_or_super(db, current_user)
+    _ensure_dispatcher_access(db, current_user, 'reservation')
     try:
         data = payload.dict(exclude_unset=True)
         if not data:
@@ -2786,7 +2840,7 @@ def update_reservation(reservation_id: int, payload: ReservationUpdate, current_
 
 @app.delete("/api/reservations/{reservation_id}")
 def delete_reservation(reservation_id: int, current_user: AdminUser = Depends(get_current_user), db: Session = Depends(get_db)):
-    _ensure_admin_or_super(db, current_user)
+    _ensure_dispatcher_access(db, current_user, 'reservation')
     try:
         chk = MySQL_Run("SELECT COUNT(*) as c FROM reservation WHERE reservation_id = %s", (reservation_id,))
         if not chk or chk[0]['c'] == 0:
@@ -2870,8 +2924,12 @@ def list_cars(
     limit: int = 20,
     search: Optional[str] = None,
     status: Optional[str] = None,
-    order: Literal['asc', 'desc'] = 'desc'
+    order: Literal['asc', 'desc'] = 'desc',
+    db: Session = Depends(get_db),
+    current_user: AdminUser = Depends(get_current_user)
 ):
+    # 檢查權限：Super Admin、Admin 和 Dispatcher 都可以存取車輛管理
+    _ensure_dispatcher_access(db, current_user, 'car')
     try:
         page = max(page, 1)
         limit = max(limit, 1)
@@ -2921,7 +2979,7 @@ def list_cars(
 
 @app.post("/api/cars")
 def create_car_resource(payload: CarResourceCreate, current_user: AdminUser = Depends(get_current_user), db: Session = Depends(get_db)):
-    _ensure_admin_or_super(db, current_user)
+    _ensure_dispatcher_access(db, current_user, 'car')
     try:
         data = payload.dict(exclude_unset=True)
         licence = (data.get('car_licence') or '').strip()
@@ -2957,7 +3015,7 @@ def create_car_resource(payload: CarResourceCreate, current_user: AdminUser = De
 
 @app.put("/api/cars/{car_id}")
 def update_car_resource(car_id: int, payload: CarResourceUpdate, current_user: AdminUser = Depends(get_current_user), db: Session = Depends(get_db)):
-    _ensure_admin_or_super(db, current_user)
+    _ensure_dispatcher_access(db, current_user, 'car')
     try:
         data = payload.dict(exclude_unset=True)
         if 'car_licence' in data and data['car_licence'] is not None:
@@ -2988,7 +3046,7 @@ def update_car_resource(car_id: int, payload: CarResourceUpdate, current_user: A
 
 @app.delete("/api/cars/{car_id}")
 def delete_car_resource(car_id: int, current_user: AdminUser = Depends(get_current_user), db: Session = Depends(get_db)):
-    _ensure_admin_or_super(db, current_user)
+    _ensure_dispatcher_access(db, current_user, 'car')
     try:
         chk = MySQL_Run("SELECT COUNT(*) as c FROM car_resource WHERE car_id = %s", (car_id,))
         if not chk or chk[0]['c'] == 0:
@@ -3457,6 +3515,343 @@ def import_xml_data(request_data: dict, current_user: AdminUser = Depends(get_cu
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"匯入失敗: {str(e)}")
 
+# ========== Excel 排班管理工具函數 ==========
+
+# Excel 檔案路徑
+SCHEDULE_EXCEL_FILE = "schedule_data.xlsx"
+EXCEL_LOCK_FILE = f"{SCHEDULE_EXCEL_FILE}.lock"
+
+# 檔案鎖，確保 Excel 操作的原子性
+excel_lock = threading.Lock()
+
+def ensure_schedule_excel_exists():
+    """確保 schedule_data.xlsx 檔案存在並有正確的結構"""
+    if not os.path.exists(SCHEDULE_EXCEL_FILE):
+        # 建立新的 Excel 檔案，包含所需的欄位
+        df = pd.DataFrame(columns=[
+            'id',  # 自動遞增的序號
+            'route_no',  # 路線編號
+            'route_name',  # 路線名稱
+            'direction',  # 方向（去程/返程/其他）
+            'special_type',  # 特殊營運型態
+            'operation_status',  # 營運狀態
+            'date',  # 日期
+            'departure_time',  # 發車時間
+            'license_plate',  # 車牌號碼
+            'car_status',  # 車輛狀態
+            'driver_name',  # 駕駛員姓名
+            'employee_id',  # 員工編號
+            'created_at',  # 建立時間
+            'updated_at',  # 更新時間
+            'is_deleted'  # 軟刪除標記（0=正常，1=已刪除）
+        ])
+        df.to_excel(SCHEDULE_EXCEL_FILE, index=False)
+        print(f"建立新的 Excel 檔案: {SCHEDULE_EXCEL_FILE}")
+
+def read_schedule_excel():
+    """讀取 Excel 檔案中的排班資料"""
+    ensure_schedule_excel_exists()
+    
+    with FileLock(EXCEL_LOCK_FILE):
+        try:
+            df = pd.read_excel(SCHEDULE_EXCEL_FILE)
+            
+            # 確保所有必要欄位都存在（遷移舊版本資料）
+            required_columns = {
+                'id': None,
+                'route_no': '',
+                'route_name': '',
+                'direction': '',
+                'special_type': '',
+                'operation_status': '',
+                'date': None,
+                'departure_time': None,
+                'license_plate': '',
+                'car_status': '',  # 確保有車輛狀態欄位
+                'driver_name': '',
+                'employee_id': '',
+                'created_at': None,
+                'updated_at': None,
+                'is_deleted': 0
+            }
+            
+            # 添加缺失的欄位
+            for col, default_value in required_columns.items():
+                if col not in df.columns:
+                    df[col] = default_value
+                    print(f"添加缺失欄位: {col}")
+            
+            # 如果添加了新欄位，保存回檔案
+            if len(df.columns) != len(required_columns):
+                df.to_excel(SCHEDULE_EXCEL_FILE, index=False)
+                print("已更新 Excel 檔案結構")
+            
+            # 只返回未刪除的記錄
+            return df[df.get('is_deleted', 0) == 0]
+        except Exception as e:
+            print(f"讀取 Excel 檔案錯誤: {e}")
+            return pd.DataFrame()
+
+def write_schedule_excel(df):
+    """寫入 DataFrame 到 Excel 檔案"""
+    with FileLock(EXCEL_LOCK_FILE):
+        try:
+            df.to_excel(SCHEDULE_EXCEL_FILE, index=False)
+            return True
+        except Exception as e:
+            print(f"寫入 Excel 檔案錯誤: {e}")
+            return False
+
+def get_next_schedule_id():
+    """取得下一個排班 ID"""
+    df = read_schedule_excel()
+    if df.empty or 'id' not in df.columns:
+        return 1
+    return int(df['id'].max()) + 1 if not df['id'].isna().all() else 1
+
+def add_schedule_to_excel(schedule_data):
+    """新增排班記錄到 Excel"""
+    with excel_lock:
+        df = read_schedule_excel()
+        
+        # 建立新記錄
+        new_record = schedule_data.copy()
+        new_record['id'] = get_next_schedule_id()
+        new_record['created_at'] = get_taiwan_datetime().strftime('%Y-%m-%d %H:%M:%S')
+        new_record['updated_at'] = get_taiwan_datetime().strftime('%Y-%m-%d %H:%M:%S')
+        new_record['is_deleted'] = 0
+        
+        # 加入路線名稱
+        if 'route_no' in new_record and new_record['route_no']:
+            route_info = MySQL_Run("SELECT route_name FROM bus_routes_total WHERE route_id = %s", (new_record['route_no'],))
+            new_record['route_name'] = route_info[0]['route_name'] if route_info else ''
+        else:
+            new_record['route_name'] = ''
+        
+        # 加入車輛狀態
+        if 'license_plate' in new_record and new_record['license_plate']:
+            car_info = MySQL_Run("SELECT car_status FROM car_resource WHERE car_licence = %s", (new_record['license_plate'],))
+            new_record['car_status'] = car_info[0]['car_status'] if car_info else ''
+        else:
+            new_record['car_status'] = ''
+        
+        # 處理 NaN 值和空值
+        for key, value in new_record.items():
+            if pd.isna(value):
+                new_record[key] = ''
+            elif value is None:
+                new_record[key] = ''
+        
+        # 新增到 DataFrame
+        new_df = pd.concat([df, pd.DataFrame([new_record])], ignore_index=True)
+        
+        if write_schedule_excel(new_df):
+            return new_record['id']
+        else:
+            raise Exception("寫入 Excel 檔案失敗")
+
+def update_schedule_in_excel(schedule_id, update_data):
+    """更新 Excel 中的排班記錄"""
+    with excel_lock:
+        df = read_schedule_excel()
+        
+        # 找到要更新的記錄
+        mask = df['id'] == schedule_id
+        if not mask.any():
+            raise Exception("找不到要更新的排班記錄")
+        
+        # 更新記錄
+        for key, value in update_data.items():
+            if key in df.columns:
+                df.loc[mask, key] = value
+        
+        df.loc[mask, 'updated_at'] = get_taiwan_datetime().strftime('%Y-%m-%d %H:%M:%S')
+        
+        # 更新路線名稱
+        if 'route_no' in update_data:
+            route_info = MySQL_Run("SELECT route_name FROM bus_routes_total WHERE route_id = %s", (update_data['route_no'],))
+            df.loc[mask, 'route_name'] = route_info[0]['route_name'] if route_info else ''
+        
+        # 更新車輛狀態
+        if 'license_plate' in update_data:
+            car_info = MySQL_Run("SELECT car_status FROM car_resource WHERE car_licence = %s", (update_data['license_plate'],))
+            df.loc[mask, 'car_status'] = car_info[0]['car_status'] if car_info else ''
+        
+        if not write_schedule_excel(df):
+            raise Exception("寫入 Excel 檔案失敗")
+
+def delete_schedule_from_excel(schedule_id):
+    """軟刪除 Excel 中的排班記錄"""
+    with excel_lock:
+        df = read_schedule_excel()
+        
+        # 檢查所有記錄（包含已刪除的）
+        with FileLock(EXCEL_LOCK_FILE):
+            full_df = pd.read_excel(SCHEDULE_EXCEL_FILE)
+        
+        mask = full_df['id'] == schedule_id
+        if not mask.any():
+            raise Exception("找不到要刪除的排班記錄")
+        
+        # 標記為已刪除
+        full_df.loc[mask, 'is_deleted'] = 1
+        full_df.loc[mask, 'updated_at'] = get_taiwan_datetime().strftime('%Y-%m-%d %H:%M:%S')
+        
+        if not write_schedule_excel(full_df):
+            raise Exception("寫入 Excel 檔案失敗")
+
+def sync_excel_to_route_schedule():
+    """將 Excel 中的最新排班資料同步到 route_schedule 表格 (UPDATE模式,保留vehicle_status)"""
+    try:
+        df = read_schedule_excel()
+        
+        # 預定義的 5 個路線-方向組合
+        route_direction_combinations = [
+            {'route_no': '1', 'direction': '去程'},
+            {'route_no': '1', 'direction': '返程'},
+            {'route_no': '2', 'direction': '去程'},
+            {'route_no': '2', 'direction': '返程'},
+            {'route_no': '3', 'direction': '去程'}  # 市民小巴7由於資料庫限制使用去程
+        ]
+        
+        # 為每個組合找最新的排班記錄
+        for combo in route_direction_combinations:
+            # 篩選符合路線和方向的記錄
+            if combo['route_no'] == '3':
+                # 市民小巴7：尋找路線3且包含"不分方向"標記的記錄，或任何方向的記錄
+                mask = (df['route_no'].astype(str) == combo['route_no']) & (
+                    (df['special_type'].astype(str).str.contains('不分方向', na=False)) | 
+                    (df['direction'] == combo['direction'])
+                )
+            else:
+                # 其他路線：嚴格匹配路線和方向
+                mask = (df['route_no'].astype(str) == combo['route_no']) & (df['direction'] == combo['direction'])
+            
+            filtered_df = df[mask]
+            
+            if not filtered_df.empty:
+                # 找出日期+時間最接近當前時間且未來的班次
+                current_datetime = get_taiwan_datetime()
+                best_record = None
+                min_time_diff = None
+                
+                for _, record in filtered_df.iterrows():
+                    # 處理日期和時間
+                    try:
+                        if pd.notna(record.get('date')) and pd.notna(record.get('departure_time')):
+                            # 轉換日期
+                            if isinstance(record['date'], str):
+                                record_date = datetime.strptime(record['date'], '%Y-%m-%d').date()
+                            else:
+                                record_date = record['date'] if hasattr(record['date'], 'date') else record['date']
+                            
+                            # 轉換時間
+                            departure_time_str = str(record['departure_time'])
+                            if ':' in departure_time_str:
+                                time_parts = departure_time_str.split(':')
+                                record_time = time(int(time_parts[0]), int(time_parts[1]))
+                            else:
+                                continue
+                            
+                            # 建立完整的日期時間
+                            record_datetime = datetime.combine(record_date, record_time)
+                            
+                            # 只考慮未來的班次
+                            if record_datetime > current_datetime:
+                                time_diff = (record_datetime - current_datetime).total_seconds()
+                                
+                                # 選擇最接近的未來班次
+                                if min_time_diff is None or time_diff < min_time_diff:
+                                    min_time_diff = time_diff
+                                    best_record = record
+                    except Exception as e:
+                        print(f"處理記錄時發生錯誤: {e}")
+                        continue
+                
+                # 如果沒有找到未來班次，則取最新的記錄（fallback）
+                if best_record is None:
+                    print(f"路線 {combo['route_no']} {combo.get('direction', '')} 沒有找到未來班次，使用最新記錄")
+                    latest_record = filtered_df.sort_values('updated_at', ascending=False).iloc[0]
+                else:
+                    print(f"路線 {combo['route_no']} {combo.get('direction', '')} 選擇最接近的未來班次: {best_record.get('date')} {best_record.get('departure_time')}")
+                    latest_record = best_record
+                
+                # 準備要更新的資料 (不包含 vehicle_status)
+                update_data = {
+                    'special_type': latest_record.get('special_type', ''),
+                    'operation_status': latest_record.get('operation_status', ''),
+                    'date': latest_record.get('date', None),
+                    'departure_time': latest_record.get('departure_time', None),
+                    'license_plate': latest_record.get('license_plate', ''),
+                    'driver_name': latest_record.get('driver_name', ''),
+                    'employee_id': latest_record.get('employee_id', '')
+                }
+                
+                # 處理日期格式
+                if pd.notna(update_data['date']) and update_data['date']:
+                    if isinstance(update_data['date'], str):
+                        update_data['date'] = update_data['date']
+                    else:
+                        update_data['date'] = update_data['date'].strftime('%Y-%m-%d')
+                else:
+                    update_data['date'] = None
+                
+                # 處理時間格式
+                if pd.notna(update_data['departure_time']) and update_data['departure_time']:
+                    update_data['departure_time'] = str(update_data['departure_time'])
+                else:
+                    update_data['departure_time'] = None
+                
+                # 清理所有 NaN 值
+                for key, value in update_data.items():
+                    if pd.isna(value):
+                        update_data[key] = None if key in ['date', 'departure_time'] else ''
+                
+                # 檢查該路線組合是否已存在於 route_schedule
+                check_sql = "SELECT id FROM route_schedule WHERE route_no = %s AND direction = %s"
+                existing = MySQL_Run(check_sql, (combo['route_no'], combo['direction']))
+                
+                if existing:
+                    # 存在則 UPDATE (明確只更新指定欄位，vehicle_status 完全不觸碰)
+                    update_fields = ', '.join([f"{key} = %s" for key in update_data.keys()])
+                    update_sql = f"UPDATE route_schedule SET {update_fields} WHERE route_no = %s AND direction = %s"
+                    update_values = list(update_data.values()) + [combo['route_no'], combo['direction']]
+                    MySQL_Run(update_sql, tuple(update_values))
+                    print(f"更新路線 {combo['route_no']} {combo['direction']} (vehicle_status 保持不變)")
+                else:
+                    # ❌ 移除 INSERT，改為跳過
+                    print(f"路線 {combo['route_no']} {combo['direction']} 不存在於 route_schedule，跳過 (不新增記錄)")
+
+            else:
+                # 如果沒有找到對應記錄,檢查資料庫是否已存在該組合
+                check_sql = "SELECT id FROM route_schedule WHERE route_no = %s AND direction = %s"
+                existing = MySQL_Run(check_sql, (combo['route_no'], combo['direction']))
+                
+                if existing:
+                    # 存在則更新為暫停營運狀態 (明確不觸碰 vehicle_status)
+                    update_sql = """
+                        UPDATE route_schedule 
+                        SET special_type = '', 
+                            operation_status = '暫停營運',
+                            date = NULL,
+                            departure_time = NULL,
+                            license_plate = '',
+                            driver_name = '',
+                            employee_id = ''
+                        WHERE route_no = %s AND direction = %s
+                    """
+                    MySQL_Run(update_sql, (combo['route_no'], combo['direction']))
+                    print(f"更新路線 {combo['route_no']} {combo['direction']} 為暫停營運 (vehicle_status 保持不變)")
+                else:
+                    # ❌ 移除 INSERT，改為跳過
+                    print(f"路線 {combo['route_no']} {combo['direction']} 不存在於 route_schedule，且無排班資料，跳過")
+
+        print("成功同步 Excel 資料到 route_schedule 表格")
+        
+    except Exception as e:
+        print(f"同步失敗: {e}")
+        raise
+
 # ========== 排班調度管理 API ==========
 
 def _serialize_schedule(row: dict):
@@ -3488,87 +3883,125 @@ def list_schedules(
     time_to: Optional[str] = None,
     operation_status: Optional[str] = None,
     sort: Optional[str] = 'date_desc',
-    current_user: AdminUser = Depends(get_current_user)
+    current_user: AdminUser = Depends(get_current_user),
+    db: Session = Depends(get_db)
 ):
-    """取得排班列表"""
+    """取得排班列表（從 Excel 讀取）"""
+    # 檢查權限：Super Admin、Admin 和 Dispatcher 都可以存取排班調度
+    _ensure_dispatcher_access(db, current_user, 'schedule')
     try:
-        conditions = []
-        params = []
+        # 從 Excel 讀取資料
+        df = read_schedule_excel()
+        
+        if df.empty:
+            return {
+                "success": True,
+                "data": [],
+                "pagination": {
+                    "page": page,
+                    "limit": limit,
+                    "total": 0,
+                    "pages": 0
+                }
+            }
+        
+        # 應用篩選條件
+        filtered_df = df.copy()
         
         # 搜尋條件
         if search:
-            conditions.append("(rs.route_no LIKE %s OR rs.license_plate LIKE %s OR rs.driver_name LIKE %s OR rs.employee_id LIKE %s OR bt.route_name LIKE %s)")
-            search_param = f"%{search}%"
-            params.extend([search_param, search_param, search_param, search_param, search_param])
+            search_lower = search.lower()
+            mask = (
+                filtered_df['route_no'].astype(str).str.contains(search_lower, case=False, na=False) |
+                filtered_df['license_plate'].astype(str).str.contains(search_lower, case=False, na=False) |
+                filtered_df['driver_name'].astype(str).str.contains(search_lower, case=False, na=False) |
+                filtered_df['employee_id'].astype(str).str.contains(search_lower, case=False, na=False) |
+                filtered_df['route_name'].astype(str).str.contains(search_lower, case=False, na=False)
+            )
+            filtered_df = filtered_df[mask]
         
         if route_no:
-            conditions.append("rs.route_no = %s")
-            params.append(route_no)
-            
-        if date_from:
-            conditions.append("rs.date >= %s")
-            params.append(date_from)
-            
-        if date_to:
-            conditions.append("rs.date <= %s")
-            params.append(date_to)
-            
-        if time_from:
-            conditions.append("rs.departure_time >= %s")
-            params.append(time_from)
-            
-        if time_to:
-            conditions.append("rs.departure_time <= %s")
-            params.append(time_to)
-            
+            filtered_df = filtered_df[filtered_df['route_no'].astype(str) == route_no]
+        
         if operation_status:
-            conditions.append("rs.operation_status = %s")
-            params.append(operation_status)
+            filtered_df = filtered_df[filtered_df['operation_status'] == operation_status]
         
-        where_clause = " AND ".join(conditions) if conditions else "1=1"
+        # 日期篩選
+        if date_from:
+            filtered_df = filtered_df[pd.to_datetime(filtered_df['date'], errors='coerce') >= pd.to_datetime(date_from)]
         
-        # 計算總數
-        count_sql = f"""
-            SELECT COUNT(*) as total 
-            FROM route_schedule rs
-            LEFT JOIN bus_routes_total bt ON rs.route_no = bt.route_id
-            WHERE {where_clause}
-        """
-        total = MySQL_Run(count_sql, tuple(params))[0]['total']
+        if date_to:
+            filtered_df = filtered_df[pd.to_datetime(filtered_df['date'], errors='coerce') <= pd.to_datetime(date_to)]
         
-        # 取得資料
-        offset = (page - 1) * limit
+        # 時間篩選
+        if time_from:
+            mask = pd.to_datetime(filtered_df['departure_time'], format='%H:%M', errors='coerce') >= pd.to_datetime(time_from, format='%H:%M')
+            filtered_df = filtered_df[mask.fillna(False)]
         
-        # 排序邏輯
-        order_clause = "rs.date DESC, rs.departure_time ASC"  # 預設排序
+        if time_to:
+            mask = pd.to_datetime(filtered_df['departure_time'], format='%H:%M', errors='coerce') <= pd.to_datetime(time_to, format='%H:%M')
+            filtered_df = filtered_df[mask.fillna(False)]
+        
+        # 排序
         if sort:
             if sort == 'date_asc':
-                order_clause = "rs.date ASC, rs.departure_time ASC"
+                filtered_df = filtered_df.sort_values(['date', 'departure_time'], ascending=[True, True])
             elif sort == 'date_desc':
-                order_clause = "rs.date DESC, rs.departure_time ASC"
+                filtered_df = filtered_df.sort_values(['date', 'departure_time'], ascending=[False, True])
             elif sort == 'departure_asc':
-                order_clause = "rs.departure_time ASC, rs.date DESC"
+                filtered_df = filtered_df.sort_values(['departure_time', 'date'], ascending=[True, False])
             elif sort == 'departure_desc':
-                order_clause = "rs.departure_time DESC, rs.date DESC"
+                filtered_df = filtered_df.sort_values(['departure_time', 'date'], ascending=[False, False])
             elif sort == 'route_asc':
-                order_clause = "rs.route_no ASC, rs.date DESC"
+                # 路線+方向+時間：依路線編號、方向(去程優先)、發車時間由早到晚排序
+                filtered_df = filtered_df.sort_values(['route_no', 'direction', 'departure_time'], ascending=[True, True, True])
             elif sort == 'route_desc':
-                order_clause = "rs.route_no DESC, rs.date DESC"
+                filtered_df = filtered_df.sort_values(['route_no', 'direction', 'departure_time'], ascending=[False, False, False])
         
-        list_sql = f"""
-            SELECT rs.*, bt.route_name, cr.car_status
-            FROM route_schedule rs
-            LEFT JOIN bus_routes_total bt ON rs.route_no = bt.route_id
-            LEFT JOIN car_resource cr ON rs.license_plate = cr.car_licence
-            WHERE {where_clause}
-            ORDER BY {order_clause}
-            LIMIT %s OFFSET %s
-        """
-        rows = MySQL_Run(list_sql, tuple(params + [limit, offset]))
+        # 計算分頁
+        total = len(filtered_df)
+        offset = (page - 1) * limit
+        paginated_df = filtered_df.iloc[offset:offset + limit]
+        
+        # 轉換為字典列表
+        data = []
+        for _, row in paginated_df.iterrows():
+            # 處理日期格式
+            date_value = row.get("date")
+            formatted_date = None
+            if pd.notna(date_value):
+                if isinstance(date_value, str):
+                    formatted_date = date_value
+                elif hasattr(date_value, 'strftime'):
+                    formatted_date = date_value.strftime("%Y-%m-%d")
+                else:
+                    formatted_date = str(date_value)
+            
+            # 安全處理所有可能為 NaN 的欄位
+            def safe_get(value, default=""):
+                if pd.isna(value):
+                    return default
+                return str(value) if value is not None else default
+            
+            schedule = {
+                "id": int(row.get("id")) if pd.notna(row.get("id")) else None,
+                "route_no": safe_get(row.get("route_no")),
+                "route_name": safe_get(row.get("route_name")),
+                "direction": safe_get(row.get("direction")),
+                "special_type": safe_get(row.get("special_type")),
+                "operation_status": safe_get(row.get("operation_status")),
+                "date": formatted_date,
+                "departure_time": safe_get(row.get("departure_time")) if pd.notna(row.get("departure_time")) else None,
+                "license_plate": safe_get(row.get("license_plate")),
+                "car_status": safe_get(row.get("car_status")),
+                "driver_name": safe_get(row.get("driver_name")),
+                "employee_id": safe_get(row.get("employee_id"))
+            }
+            data.append(schedule)
         
         return {
             "success": True,
-            "data": [_serialize_schedule(row) for row in rows],
+            "data": data,
             "pagination": {
                 "page": page,
                 "limit": limit,
@@ -3582,8 +4015,8 @@ def list_schedules(
 
 @app.post("/api/schedules")
 def create_schedule(payload: ScheduleCreate, current_user: AdminUser = Depends(get_current_user), db: Session = Depends(get_db)):
-    """新增排班"""
-    _ensure_admin_or_super(db, current_user)
+    """新增排班（寫入 Excel）"""
+    _ensure_dispatcher_access(db, current_user, 'schedule')
     try:
         # 驗證路線是否存在
         route_check = MySQL_Run("SELECT COUNT(*) as cnt FROM bus_routes_total WHERE route_id = %s", (payload.route_no,))
@@ -3602,47 +4035,50 @@ def create_schedule(payload: ScheduleCreate, current_user: AdminUser = Depends(g
             if car_check[0]['car_status'] not in ['service']:
                 raise HTTPException(status_code=400, detail=f"車牌 {payload.license_plate} 目前狀態為 {car_check[0]['car_status']}，無法派車")
             
-            # 檢查衝突：同一時間同一車牌不能重複使用
-            license_conflict = MySQL_Run("""
-                SELECT COUNT(*) as cnt FROM route_schedule 
-                WHERE license_plate = %s AND date = %s AND departure_time = %s
-            """, (payload.license_plate, payload.schedule_date, payload.departure_time))
+            # 從 Excel 檢查衝突
+            df = read_schedule_excel()
             
-            if license_conflict and license_conflict[0]['cnt'] > 0:
-                raise HTTPException(status_code=400, detail=f"車牌 {payload.license_plate} 在 {payload.schedule_date} {payload.departure_time} 時段已有排班")
-            
-            # 檢查衝突：同一時間同一駕駛員不能重複排班
-            driver_conflict = MySQL_Run("""
-                SELECT COUNT(*) as cnt FROM route_schedule 
-                WHERE driver_name = %s AND date = %s AND departure_time = %s
-            """, (payload.driver_name, payload.schedule_date, payload.departure_time))
-            
-            if driver_conflict and driver_conflict[0]['cnt'] > 0:
-                raise HTTPException(status_code=400, detail=f"駕駛員 {payload.driver_name} 在 {payload.schedule_date} {payload.departure_time} 時段已有排班")
-            
-            # 檢查衝突：同一時間同一員工編號不能重複排班
-            employee_conflict = MySQL_Run("""
-                SELECT COUNT(*) as cnt FROM route_schedule 
-                WHERE employee_id = %s AND date = %s AND departure_time = %s
-            """, (payload.employee_id, payload.schedule_date, payload.departure_time))
-            
-            if employee_conflict and employee_conflict[0]['cnt'] > 0:
-                raise HTTPException(status_code=400, detail=f"員工編號 {payload.employee_id} 在 {payload.schedule_date} {payload.departure_time} 時段已有排班")
+            if not df.empty:
+                # 檢查車牌衝突
+                license_conflict = df[
+                    (df['license_plate'] == payload.license_plate) &
+                    (df['date'].astype(str) == str(payload.schedule_date)) &
+                    (df['departure_time'].astype(str) == str(payload.departure_time))
+                ]
+                if not license_conflict.empty:
+                    raise HTTPException(status_code=400, detail=f"車牌 {payload.license_plate} 在 {payload.schedule_date} {payload.departure_time} 時段已有排班")
+                
+                # 檢查駕駛員衝突
+                driver_conflict = df[
+                    (df['driver_name'] == payload.driver_name) &
+                    (df['date'].astype(str) == str(payload.schedule_date)) &
+                    (df['departure_time'].astype(str) == str(payload.departure_time))
+                ]
+                if not driver_conflict.empty:
+                    raise HTTPException(status_code=400, detail=f"駕駛員 {payload.driver_name} 在 {payload.schedule_date} {payload.departure_time} 時段已有排班")
+                
+                # 檢查員工編號衝突
+                employee_conflict = df[
+                    (df['employee_id'] == payload.employee_id) &
+                    (df['date'].astype(str) == str(payload.schedule_date)) &
+                    (df['departure_time'].astype(str) == str(payload.departure_time))
+                ]
+                if not employee_conflict.empty:
+                    raise HTTPException(status_code=400, detail=f"員工編號 {payload.employee_id} 在 {payload.schedule_date} {payload.departure_time} 時段已有排班")
         
-        # 插入資料（需要將schedule_date轉換為date欄位，過濾None值）
+        # 準備資料
         data = payload.dict(exclude_none=True)
-        # 將schedule_date重新命名為date以符合資料庫欄位
+        # 將schedule_date重新命名為date以符合Excel欄位
         if 'schedule_date' in data:
             data['date'] = data.pop('schedule_date')
         
-        columns = list(data.keys())
-        placeholders = ', '.join(['%s'] * len(columns))
-        values = list(data.values())
+        # 新增到 Excel
+        schedule_id = add_schedule_to_excel(data)
         
-        sql = f"INSERT INTO route_schedule ({', '.join(columns)}) VALUES ({placeholders})"
-        result = MySQL_Run(sql, tuple(values))
+        # 同步到 route_schedule 表格
+        sync_excel_to_route_schedule()
         
-        return {"success": True, "schedule_id": result.get('lastrowid')}
+        return {"success": True, "schedule_id": schedule_id}
         
     except HTTPException:
         raise
@@ -3652,18 +4088,20 @@ def create_schedule(payload: ScheduleCreate, current_user: AdminUser = Depends(g
 
 @app.put("/api/schedules/{schedule_id}")
 def update_schedule(schedule_id: int, payload: ScheduleUpdate, current_user: AdminUser = Depends(get_current_user), db: Session = Depends(get_db)):
-    """更新排班"""
-    _ensure_admin_or_super(db, current_user)
+    """更新排班（更新 Excel）"""
+    _ensure_dispatcher_access(db, current_user, 'schedule')
     try:
-        # 檢查排班是否存在
-        schedule_check = MySQL_Run("SELECT * FROM route_schedule WHERE id = %s", (schedule_id,))
-        if not schedule_check:
+        # 檢查排班是否存在於 Excel
+        df = read_schedule_excel()
+        
+        current_record = df[df['id'] == schedule_id]
+        if current_record.empty:
             raise HTTPException(status_code=404, detail="排班記錄不存在")
         
-        current_schedule = schedule_check[0]
+        current_schedule = current_record.iloc[0].to_dict()
         data = payload.dict(exclude_unset=True)
         
-        # 將schedule_date轉換為date以符合資料庫欄位
+        # 將schedule_date轉換為date以符合Excel欄位
         if 'schedule_date' in data:
             data['date'] = data.pop('schedule_date')
         
@@ -3690,54 +4128,50 @@ def update_schedule(schedule_id: int, payload: ScheduleUpdate, current_user: Adm
                     raise HTTPException(status_code=400, detail=f"車牌 {data['license_plate']} 目前狀態為 {car_check[0]['car_status']}，無法派車")
             
             # 準備檢查衝突的資料
-            check_license = data.get('license_plate', current_schedule['license_plate'])
-            check_date = data.get('date', current_schedule['date'])
-            check_driver = data.get('driver_name', current_schedule['driver_name'])
-            check_employee = data.get('employee_id', current_schedule['employee_id'])
+            check_license = data.get('license_plate', current_schedule.get('license_plate'))
+            check_date = data.get('date', current_schedule.get('date'))
+            check_driver = data.get('driver_name', current_schedule.get('driver_name'))
+            check_employee = data.get('employee_id', current_schedule.get('employee_id'))
+            check_departure_time = data.get('departure_time', current_schedule.get('departure_time'))
             
-            # 準備檢查衝突需要的發車時間
-            check_departure_time = data.get('departure_time', current_schedule['departure_time'])
+            # 從 Excel 檢查衝突（排除當前記錄）
+            filtered_df = df[df['id'] != schedule_id]
             
-            # 只有在有車牌資料時才檢查車牌衝突
+            # 檢查車牌衝突
             if check_license and check_departure_time:
-                license_conflict = MySQL_Run("""
-                    SELECT COUNT(*) as cnt FROM route_schedule 
-                    WHERE license_plate = %s AND date = %s AND departure_time = %s AND id != %s
-                """, (check_license, check_date, check_departure_time, schedule_id))
-                
-                if license_conflict and license_conflict[0]['cnt'] > 0:
+                license_conflict = filtered_df[
+                    (filtered_df['license_plate'] == check_license) &
+                    (filtered_df['date'].astype(str) == str(check_date)) &
+                    (filtered_df['departure_time'].astype(str) == str(check_departure_time))
+                ]
+                if not license_conflict.empty:
                     raise HTTPException(status_code=400, detail=f"車牌 {check_license} 在 {check_date} {check_departure_time} 時段已有排班")
             
-            # 只有在有駕駛員資料時才檢查駕駛員衝突
+            # 檢查駕駛員衝突
             if check_driver and check_departure_time:
-                driver_conflict = MySQL_Run("""
-                    SELECT COUNT(*) as cnt FROM route_schedule 
-                    WHERE driver_name = %s AND date = %s AND departure_time = %s AND id != %s
-                """, (check_driver, check_date, check_departure_time, schedule_id))
-                
-                if driver_conflict and driver_conflict[0]['cnt'] > 0:
+                driver_conflict = filtered_df[
+                    (filtered_df['driver_name'] == check_driver) &
+                    (filtered_df['date'].astype(str) == str(check_date)) &
+                    (filtered_df['departure_time'].astype(str) == str(check_departure_time))
+                ]
+                if not driver_conflict.empty:
                     raise HTTPException(status_code=400, detail=f"駕駛員 {check_driver} 在 {check_date} {check_departure_time} 時段已有排班")
             
-            # 只有在有員工編號資料時才檢查員工編號衝突
+            # 檢查員工編號衝突
             if check_employee and check_departure_time:
-                employee_conflict = MySQL_Run("""
-                    SELECT COUNT(*) as cnt FROM route_schedule 
-                    WHERE employee_id = %s AND date = %s AND departure_time = %s AND id != %s
-                """, (check_employee, check_date, check_departure_time, schedule_id))
-                
-                if employee_conflict and employee_conflict[0]['cnt'] > 0:
+                employee_conflict = filtered_df[
+                    (filtered_df['employee_id'] == check_employee) &
+                    (filtered_df['date'].astype(str) == str(check_date)) &
+                    (filtered_df['departure_time'].astype(str) == str(check_departure_time))
+                ]
+                if not employee_conflict.empty:
                     raise HTTPException(status_code=400, detail=f"員工編號 {check_employee} 在 {check_date} {check_departure_time} 時段已有排班")
         
-        # 更新資料
-        sets = []
-        params = []
-        for key, value in data.items():
-            sets.append(f"{key} = %s")
-            params.append(value)
-        params.append(schedule_id)
+        # 更新 Excel
+        update_schedule_in_excel(schedule_id, data)
         
-        sql = f"UPDATE route_schedule SET {', '.join(sets)} WHERE id = %s"
-        MySQL_Run(sql, tuple(params))
+        # 同步到 route_schedule 表格
+        sync_excel_to_route_schedule()
         
         return {"success": True}
         
@@ -3749,21 +4183,290 @@ def update_schedule(schedule_id: int, payload: ScheduleUpdate, current_user: Adm
 
 @app.delete("/api/schedules/{schedule_id}")
 def delete_schedule(schedule_id: int, current_user: AdminUser = Depends(get_current_user), db: Session = Depends(get_db)):
-    """刪除排班"""
-    _ensure_admin_or_super(db, current_user)
+    """刪除排班（軟刪除 Excel 記錄）"""
+    _ensure_dispatcher_access(db, current_user, 'schedule')
     try:
-        # 檢查排班是否存在
-        schedule_check = MySQL_Run("SELECT COUNT(*) as cnt FROM route_schedule WHERE id = %s", (schedule_id,))
-        if not schedule_check or schedule_check[0]['cnt'] == 0:
+        # 檢查排班是否存在於 Excel
+        df = read_schedule_excel()
+        
+        if df[df['id'] == schedule_id].empty:
             raise HTTPException(status_code=404, detail="排班記錄不存在")
         
-        MySQL_Run("DELETE FROM route_schedule WHERE id = %s", (schedule_id,))
+        # 軟刪除 Excel 記錄
+        delete_schedule_from_excel(schedule_id)
+        
+        # 同步到 route_schedule 表格
+        sync_excel_to_route_schedule()
+        
         return {"success": True}
         
     except HTTPException:
         raise
     except Exception as e:
         print("delete_schedule error:", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/schedules/batch/validate")
+def validate_batch_schedules(request: dict, current_user: AdminUser = Depends(get_current_user), db: Session = Depends(get_db)):
+    """批次驗證排班資料（不寫入資料庫）"""
+    _ensure_dispatcher_access(db, current_user, 'schedule')
+    
+    try:
+        schedules = request.get('schedules', [])
+        
+        if not schedules:
+            return {"all_valid": False, "errors": [{"row": 0, "field": "整體", "message": "沒有提供任何排班資料"}]}
+        
+        if len(schedules) > 500:
+            return {"all_valid": False, "errors": [{"row": 0, "field": "整體", "message": "資料筆數超過限制（最多 500 筆）"}]}
+        
+        errors = []
+        
+        # 讀取現有排班資料
+        try:
+            df_existing = read_schedule_excel()
+        except Exception as e:
+            print(f"讀取排班 Excel 錯誤: {e}")
+            df_existing = pd.DataFrame()
+        
+        # 讀取駕駛員資料
+        try:
+            drivers_df = pd.read_excel("Drivers_Info.xlsx") if os.path.exists("Drivers_Info.xlsx") else pd.DataFrame()
+        except Exception as e:
+            print(f"讀取駕駛員 Excel 錯誤: {e}")
+            drivers_df = pd.DataFrame()
+        
+        # 一次性查詢所有路線和車輛（避免在循環中重複查詢）
+        try:
+            valid_routes = set(str(r['route_id']) for r in MySQL_Run("SELECT route_id FROM bus_routes_total WHERE status IN (0, 1)"))
+            valid_cars = set(str(c['car_licence']) for c in MySQL_Run("SELECT car_licence FROM car_resource WHERE car_status = 'service'"))
+        except Exception as e:
+            print(f"查詢路線或車輛錯誤: {e}")
+            valid_routes = set()
+            valid_cars = set()
+        
+        valid_drivers = {}
+        if not drivers_df.empty and 'Employee_number' in drivers_df.columns and 'Driver_name' in drivers_df.columns:
+            for _, row in drivers_df.iterrows():
+                emp_num = str(row['Employee_number']).strip()
+                driver_name = str(row['Driver_name']).strip()
+                valid_drivers[emp_num] = driver_name
+        
+        # 標準化時間格式的輔助函數（定義在循環外）
+        def normalize_time(time_str):
+            """將時間統一為 HH:MM 格式以便比對"""
+            if not time_str or pd.isna(time_str):
+                return ''
+            time_str = str(time_str).strip()
+            # 移除秒數，只保留 HH:MM
+            parts = time_str.split(':')
+            if len(parts) >= 2:
+                return f"{parts[0].zfill(2)}:{parts[1].zfill(2)}"
+            return time_str
+        
+        # 預先標準化資料庫中的時間格式（只做一次）
+        if not df_existing.empty:
+            df_existing['departure_time_normalized'] = df_existing['departure_time'].apply(normalize_time)
+        
+        # 用於檢查內部重複的集合
+        batch_keys = set()
+        
+        for idx, schedule in enumerate(schedules):
+            row = schedule.get('row_number', idx + 2)
+            route_no = str(schedule.get('route_no', '')).strip()
+            direction = schedule.get('direction', '').strip()
+            special_type = schedule.get('special_type', '').strip()
+            date = schedule.get('date', '').strip()
+            departure_time = schedule.get('departure_time', '').strip()
+            license_plate = schedule.get('license_plate', '').strip()
+            driver_name = schedule.get('driver_name', '').strip()
+            employee_id = str(schedule.get('employee_id', '')).strip()
+            
+            # 標準化時間格式
+            departure_time_normalized = normalize_time(departure_time)
+            
+            # 驗證路線是否存在且啟用
+            if route_no not in valid_routes:
+                errors.append({"row": row, "field": "路線編號", "message": f"路線 {route_no} 不存在或未啟用"})
+            
+            # 驗證車輛是否存在且可用
+            if license_plate not in valid_cars:
+                errors.append({"row": row, "field": "牌照號碼", "message": f"車輛 {license_plate} 不存在或不在服務中"})
+            
+            # 驗證駕駛員資訊
+            if employee_id not in valid_drivers:
+                errors.append({"row": row, "field": "員工編號", "message": f"員工編號 {employee_id} 不存在於駕駛員資料中"})
+            elif valid_drivers[employee_id] != driver_name:
+                errors.append({"row": row, "field": "駕駛員姓名", "message": f"駕駛員姓名與員工編號不符（應為 {valid_drivers[employee_id]}）"})
+            
+            # 檢查批次內部是否有重複（同路線、同方向、同日期、同發車時間）
+            batch_key = f"{route_no}|{direction}|{date}|{departure_time_normalized}"
+            if batch_key in batch_keys:
+                errors.append({"row": row, "field": "整體", "message": "批次資料中有重複的排班（相同路線、方向、日期、發車時間）"})
+            batch_keys.add(batch_key)
+            
+            # 檢查是否與現有排班衝突
+            if not df_existing.empty:
+                # 調試輸出
+                print(f"\n=== 檢查衝突 ===")
+                print(f"新增資料: 路線{route_no}, {direction}, {date}, {departure_time_normalized}, 車輛{license_plate}, 駕駛{employee_id}")
+                print(f"資料庫中有 {len(df_existing)} 筆排班記錄")
+                
+                # 檢查車輛衝突（同一車輛在同一時段）
+                car_conflict = df_existing[
+                    (df_existing['license_plate'].astype(str).str.strip() == license_plate) &
+                    (df_existing['date'].astype(str).str.strip() == date) &
+                    (df_existing['departure_time_normalized'] == departure_time_normalized)
+                ]
+                if not car_conflict.empty:
+                    print(f"發現車輛衝突: {len(car_conflict)} 筆")
+                    errors.append({"row": row, "field": "牌照號碼", "message": f"車輛 {license_plate} 在 {date} {departure_time} 已有排班"})
+                
+                # 檢查駕駛員衝突（同一駕駛員在同一時段）
+                driver_conflict = df_existing[
+                    (df_existing['employee_id'].astype(str).str.strip() == employee_id) &
+                    (df_existing['date'].astype(str).str.strip() == date) &
+                    (df_existing['departure_time_normalized'] == departure_time_normalized)
+                ]
+                if not driver_conflict.empty:
+                    print(f"發現駕駛員衝突: {len(driver_conflict)} 筆")
+                    errors.append({"row": row, "field": "員工編號", "message": f"駕駛員 {driver_name} 在 {date} {departure_time} 已有排班"})
+                
+                # 檢查完全相同的排班
+                exact_duplicate = df_existing[
+                    (df_existing['route_no'].astype(str).str.strip() == route_no) &
+                    (df_existing['direction'].astype(str).str.strip() == direction) &
+                    (df_existing['date'].astype(str).str.strip() == date) &
+                    (df_existing['departure_time_normalized'] == departure_time_normalized)
+                ]
+                if not exact_duplicate.empty:
+                    print(f"發現完全相同排班: {len(exact_duplicate)} 筆")
+                    errors.append({"row": row, "field": "整體", "message": f"相同的排班已存在（路線 {route_no} {direction} {date} {departure_time}）"})
+                else:
+                    print(f"未發現重複排班")
+        
+        # 返回驗證結果
+        return {
+            "all_valid": len(errors) == 0,
+            "total_records": len(schedules),
+            "errors": errors
+        }
+        
+    except Exception as e:
+        print("validate_batch_schedules error:", e)
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/schedules/batch/create")
+def create_batch_schedules(request: dict, current_user: AdminUser = Depends(get_current_user), db: Session = Depends(get_db)):
+    """批次新增排班（全部成功或全部失敗）"""
+    _ensure_dispatcher_access(db, current_user, 'schedule')
+    
+    try:
+        schedules = request.get('schedules', [])
+        
+        if not schedules:
+            raise HTTPException(status_code=400, detail="沒有提供任何排班資料")
+        
+        if len(schedules) > 500:
+            raise HTTPException(status_code=400, detail="資料筆數超過限制（最多 500 筆）")
+        
+        # 使用檔案鎖確保原子性操作
+        with FileLock(EXCEL_LOCK_FILE, timeout=10):
+            # 讀取現有資料（包含所有記錄）
+            try:
+                df_all = pd.read_excel(SCHEDULE_EXCEL_FILE)
+            except Exception as e:
+                print(f"讀取 Excel 錯誤: {e}")
+                df_all = pd.DataFrame()
+            
+            # 取得下一個可用的 ID
+            if df_all.empty or 'id' not in df_all.columns:
+                next_id = 1
+            else:
+                next_id = int(df_all['id'].max()) + 1 if not df_all['id'].isna().all() else 1
+            
+            # 準備新增的資料列表
+            new_records = []
+            current_time = get_taiwan_datetime().strftime('%Y-%m-%d %H:%M:%S')
+            
+            for schedule in schedules:
+                route_no = str(schedule.get('route_no', '')).strip()
+                license_plate = schedule.get('license_plate', '').strip()
+                
+                # 取得路線名稱
+                route_name = ''
+                try:
+                    route_info = MySQL_Run("SELECT route_name FROM bus_routes_total WHERE route_id = %s", (route_no,))
+                    if route_info:
+                        route_name = route_info[0]['route_name']
+                except Exception as e:
+                    print(f"取得路線名稱錯誤: {e}")
+                
+                # 取得車輛狀態
+                car_status = ''
+                try:
+                    car_info = MySQL_Run("SELECT car_status FROM car_resource WHERE car_licence = %s", (license_plate,))
+                    if car_info:
+                        car_status = car_info[0]['car_status']
+                except Exception as e:
+                    print(f"取得車輛狀態錯誤: {e}")
+                
+                new_record = {
+                    'id': next_id,
+                    'route_no': route_no,
+                    'route_name': route_name,
+                    'direction': schedule.get('direction', '').strip(),
+                    'special_type': schedule.get('special_type', '').strip(),
+                    'operation_status': '正常營運',  # 固定為正常營運
+                    'date': schedule.get('date', '').strip(),
+                    'departure_time': schedule.get('departure_time', '').strip(),
+                    'license_plate': license_plate,
+                    'car_status': car_status,
+                    'driver_name': schedule.get('driver_name', '').strip(),
+                    'employee_id': str(schedule.get('employee_id', '')).strip(),
+                    'created_at': current_time,
+                    'updated_at': current_time,
+                    'is_deleted': 0
+                }
+                new_records.append(new_record)
+                next_id += 1
+            
+            # 建立新資料的 DataFrame
+            df_new = pd.DataFrame(new_records)
+            
+            # 合併到現有資料（使用 concat 而非覆蓋）
+            if df_all.empty:
+                df_combined = df_new
+            else:
+                df_combined = pd.concat([df_all, df_new], ignore_index=True)
+            
+            # 寫入 Excel（保留所有現有資料）
+            df_combined.to_excel(SCHEDULE_EXCEL_FILE, index=False, engine='openpyxl')
+            
+            print(f"批次新增成功，已寫入 Excel，共 {len(schedules)} 筆")
+        
+        # 批次新增完成後同步到 route_schedule
+        try:
+            sync_excel_to_route_schedule()
+            print("已同步更新 route_schedule 表")
+        except Exception as sync_error:
+            print(f"同步 route_schedule 失敗: {sync_error}")
+            # 不影響批次新增的成功結果
+        
+        return {
+            "success": True,
+            "created_count": len(schedules),
+            "message": f"成功新增 {len(schedules)} 筆排班資料"
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        print("create_batch_schedules error:", e)
+        import traceback
+        traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/api/schedules/routes")
@@ -3842,6 +4545,106 @@ def get_schedule_drivers(current_user: AdminUser = Depends(get_current_user)):
             "success": True,
             "data": []
         }
+
+@app.get("/api/schedules/departure-times/{route_name}")
+def get_departure_times(
+    route_name: str,
+    current_user: AdminUser = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """根據路線名稱從 Excel 檔案讀取發車時間"""
+    # 檢查權限：Super Admin、Admin 和 Dispatcher 都可以存取排班調度
+    _ensure_dispatcher_access(db, current_user, 'schedule')
+    
+    try:
+        import pandas as pd
+        excel_file_path = "Departure_Time.xlsx"
+        
+        # 檢查檔案是否存在
+        if not os.path.exists(excel_file_path):
+            print(f"發車時間 Excel 檔案不存在: {excel_file_path}")
+            return {
+                "success": True,
+                "data": []
+            }
+        
+        # 使用 with 語句確保檔案被正確關閉
+        with pd.ExcelFile(excel_file_path) as xl:
+            # 檢查是否有對應的工作表
+            if route_name not in xl.sheet_names:
+                print(f"找不到路線 '{route_name}' 對應的工作表。可用工作表: {xl.sheet_names}")
+                return {
+                    "success": True,
+                    "data": []
+                }
+            
+            # 讀取對應工作表的資料
+            df = pd.read_excel(xl, sheet_name=route_name)
+        
+        # 取得第一欄的時間資料
+        if len(df.columns) == 0 or len(df) == 0:
+            return {
+                "success": True,
+                "data": []
+            }
+        
+        # 取得第一欄資料並轉換為時間字串列表
+        time_column = df.iloc[:, 0]  # 取第一欄
+        departure_times = []
+        
+        for time_value in time_column:
+            if pd.notna(time_value):
+                try:
+                    # 如果是 time 物件，直接格式化
+                    if hasattr(time_value, 'strftime'):
+                        formatted_time = time_value.strftime('%H:%M')
+                    # 如果是字串，嘗試解析
+                    elif isinstance(time_value, str):
+                        # 處理可能的時間格式
+                        if ':' in time_value:
+                            # 取前面的 HH:MM 部分
+                            time_part = time_value.split('.')[0]  # 移除毫秒部分
+                            time_parts = time_part.split(':')
+                            if len(time_parts) >= 2:
+                                formatted_time = f"{time_parts[0].zfill(2)}:{time_parts[1].zfill(2)}"
+                            else:
+                                continue
+                        else:
+                            continue
+                    else:
+                        # 嘗試轉換為字串後處理
+                        time_str = str(time_value)
+                        if ':' in time_str:
+                            time_part = time_str.split('.')[0]
+                            time_parts = time_part.split(':')
+                            if len(time_parts) >= 2:
+                                formatted_time = f"{time_parts[0].zfill(2)}:{time_parts[1].zfill(2)}"
+                            else:
+                                continue
+                        else:
+                            continue
+                    
+                    departure_times.append(formatted_time)
+                    
+                except Exception as e:
+                    print(f"處理時間值 {time_value} 時發生錯誤: {e}")
+                    continue
+        
+        # 移除重複並排序
+        departure_times = sorted(list(set(departure_times)))
+        
+        return {
+            "success": True,
+            "data": departure_times
+        }
+        
+    except Exception as e:
+        print("get_departure_times error:", e)
+        return {
+            "success": False,
+            "error": f"讀取發車時間失敗: {str(e)}"
+        }
+
 
 # ========== 同時開啟前後端 ==========
 app.mount('/home', StaticFiles(directory='dist', html=True), name='client')

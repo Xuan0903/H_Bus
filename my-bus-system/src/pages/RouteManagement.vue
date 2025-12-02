@@ -465,11 +465,11 @@
               <input v-model="currentRoute.route_name" type="text" class="form-input" required placeholder="請輸入路線名稱" />
             </div>
             <div class="form-group">
-              <label class="form-label">方向</label>
+              <label class="form-label">路線類型</label>
               <select v-model="currentRoute.direction" class="form-select">
                 <option value="">(未指定)</option>
-                <option value="單向">單向</option>
-                <option value="雙向">雙向</option>
+                <option value="單向">循環線</option>
+                <option value="雙向">折返線</option>
               </select>
             </div>
           </div>
@@ -491,8 +491,8 @@
             <div class="form-group full-width">
               <label class="form-label">狀態</label>
               <select v-model.number="currentRoute.status" class="form-select">
-                <option :value="1">啟用</option>
                 <option :value="0">停用</option>
+                <option :value="1">啟用</option>
               </select>
             </div>
           </div>
@@ -876,7 +876,7 @@ const currentRoute = ref({
   direction: '',
   start_stop: '',
   end_stop: '',
-  status: 1
+  status: 0
 })
 
 // 刪除路線狀態
@@ -940,7 +940,11 @@ const openEditRoute = (r: any) => {
 
 const loadRouteList = async () => {
   try {
-    const res = await fetch('/All_Route')
+    const res = await fetch('/All_Route', {
+      headers: {
+        'Authorization': `Bearer ${localStorage.getItem('token') || ''}`
+      }
+    })
     let data: any = null
     if (res.ok) {
       try {
@@ -980,7 +984,11 @@ const loadRouteList = async () => {
     // fallback to older endpoint (try relative first, then backend host)
     if (!routeList.value.length) {
       try {
-        let r2 = await fetch('/api/routes')
+        let r2 = await fetch('/api/routes', {
+          headers: {
+            'Authorization': `Bearer ${localStorage.getItem('token') || ''}`
+          }
+        })
         let d2: any = null
         if (r2.ok) {
           try { d2 = await r2.json() } catch (e) { d2 = null }
@@ -1034,13 +1042,13 @@ const toggleRouteStatus = async (r: any) => {
 }
 
 const openCreateRouteModal = () => {
-  currentRoute.value = { route_id: undefined, route_name: '', direction: '', start_stop: '', end_stop: '', status: 1 }
+  currentRoute.value = { route_id: undefined, route_name: '', direction: '', start_stop: '', end_stop: '', status: 0 }
   showRouteModal.value = true
 }
 
 const closeRouteModal = () => {
   showRouteModal.value = false
-  currentRoute.value = { route_id: undefined, route_name: '', direction: '', start_stop: '', end_stop: '', status: 1 }
+  currentRoute.value = { route_id: undefined, route_name: '', direction: '', start_stop: '', end_stop: '', status: 0 }
 }
 
 const saveRoute = async () => {
@@ -1165,7 +1173,11 @@ const loadStations = async () => {
 const loadAvailableRoutes = async () => {
   try {
     // 優先從 bus_routes_total (/All_Route) 取得路線（與新增路線來源一致）
-    let response = await fetch('/All_Route')
+    let response = await fetch('/All_Route', {
+      headers: {
+        'Authorization': `Bearer ${localStorage.getItem('token') || ''}`
+      }
+    })
     let data: any = null
     if (response.ok) {
       try { data = await response.json() } catch (e) { data = null }
@@ -1186,7 +1198,11 @@ const loadAvailableRoutes = async () => {
     }
 
     // 若 /All_Route 不可用，退回到舊的 /api/routes
-    response = await fetch('/api/routes')
+    response = await fetch('/api/routes', {
+      headers: {
+        'Authorization': `Bearer ${localStorage.getItem('token') || ''}`
+      }
+    })
     if (response.ok) {
       const data = await response.json()
       availableRoutes.value = data.routes || []
@@ -1524,9 +1540,45 @@ const performSaveStation = async () => {
 
   if (response.ok) {
     const result = await response.json()
-    closeModal()
+    
+    // 重新載入站點列表
     loadStations()
+    
+    // 顯示成功訊息
     alert(result.message || (isEditMode.value ? '站點更新成功！' : '站點新增成功！'))
+    
+    // 編輯模式：關閉模態框
+    // 新增模式：保持模態框開啟，清空表單以便連續新增
+    if (isEditMode.value) {
+      closeModal()
+    } else {
+      // 清空表單欄位，但保留路線ID和方向，方便連續新增同路線的站點
+      const preservedRouteId = currentStation.value.route_id
+      const preservedRouteName = currentStation.value.route_name
+      const preservedDirection = currentStation.value.direction
+      
+      currentStation.value = {
+        route_id: preservedRouteId,
+        route_name: preservedRouteName,
+        direction: preservedDirection,
+        stop_name: '',
+        latitude: 0,
+        longitude: 0,
+        stop_order: 0,
+        eta_from_start: 0,
+        address: '',
+        replace_existing: false,
+        auto_reorder: false
+      }
+      
+      // 自動建議下一個站點順序
+      try {
+        const suggestedOrder = await getSuggestedOrder(preservedRouteId, preservedDirection)
+        currentStation.value.stop_order = suggestedOrder
+      } catch (error) {
+        console.error('取得建議順序失敗:', error)
+      }
+    }
   } else {
     let errorMessage = '操作失敗，請重試'
     try {

@@ -19,3 +19,17 @@ venv/
 # Secrets (compose will load env at runtime)
 .env
 .env.*
+
+# Local artifacts not needed in Docker context
+qrcodes/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+*.ipynb
+*.csv
+*.sql
+*.pem
+*.key
+*.crt

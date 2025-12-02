@@ -219,11 +219,20 @@ html,body,#root{height:100%;margin:0;}
   color: #fff;
   font-weight: 500;
 }
+/* 標題＋倒數放左邊，附近站點按鈕放右邊 */
 .arrival-header {
   display: flex;
-  flex-direction: column;
+  flex-direction: row;
+  justify-content: space-between;
   align-items: flex-start;
-  margin-bottom: 10px;
+  margin-bottom: 12px;
+}
+
+/* 左側區塊：上下堆疊 */
+.arrival-header-left {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
 }
 
 .arrival-header-title {
@@ -242,13 +251,52 @@ html,body,#root{height:100%;margin:0;}
   font-size: 0.75em;
 }
 
+/* 右側按鈕：不被 flex 撐滿、不被縮爆、不截字 */
+.arrival-header-btn {
+  flex-shrink: 0 !important;      /* 不被壓縮 */
+  width: 90px !important;         /* ← 調整按鈕寬度 */
+  height: 38px !important;        /* ← 調整高度 */
+  padding: 0 10px !important;     /* 內距讓字舒服 */
+  font-size: 0.9rem !important;
+  font-weight: 700 !important;
+  border-radius: 8px;
+  white-space: nowrap;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  box-shadow: 0 2px 6px rgba(0,0,0,0.12);
+}
+
+
+
+/* 外框固定最小高度，不會塌掉 */
 .arrival-container {
   background-color: #fff;
   border-radius: 10px;
   padding: 16px 18px;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
-  margin: 16px 0 20px 0; /* 上下空隙 */
+  box-shadow: 0 1px 3px rgba(0,0,0,0.08);
+  margin: 16px 0 20px 0;
+  min-height: 240px;
+  display: flex;
+  flex-direction: column;
 }
+
+/* 讓列表填滿，底部留白也好看 */
+.arrival-list {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-start;
+}
+
+.arrival-list .muted.small {
+  text-align: center;
+  padding-top: 30px;
+  color: #666 !important;
+  font-weight: 600;
+  font-size: 0.9rem !important;
+}
+
 
 .center-vertical{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:10px;height:88px}
 .mt-12{margin-top:12px}
@@ -409,6 +457,7 @@ html,body,#root{height:100%;margin:0;}
   display:flex; align-items:flex-end; justify-content:center;
   background: linear-gradient(180deg, rgba(0,0,0,0.12), rgba(0,0,0,0.18));
 }
+
 .route-detail-panel {
   width:100%; max-width:720px; background:#fff; border-radius:12px 12px 0 0; padding:14px; box-shadow: 0 -8px 30px rgba(0,0,0,0.2);
   animation: slide-up .22s ease;
@@ -418,14 +467,36 @@ html,body,#root{height:100%;margin:0;}
 /* Tiny spinner icon */
 .spinner { width:14px; height:14px; border:2px solid rgba(0,0,0,0.15); border-top-color: var(--pantone-blue); border-radius:50%; display:inline-block; animation: spin .7s linear infinite; vertical-align: middle; }
 @keyframes spin { to { transform: rotate(360deg); } }
-.panel-head { display:flex; justify-content:space-between; align-items:center; margin-bottom:8px; }
-.panel-head > div:first-child{ flex:1; min-width:0; }
-.panel-head > div:last-child{ display:flex; gap:8px; flex-shrink:0; }
+.panel-head {
+  display: flex;
+  flex-direction: column;     /* ✅ 關鍵：改成直向排列 */
+  align-items: center;        /* 標題與按鈕都置中 */
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+/* 第一個 div：放標題，讓它置中即可 */
+.panel-head > div:first-child {
+  flex: none;
+  min-width: 0;
+  text-align: center;         /* ✅ 標題文字置中 */
+}
+
+/* 第二個 div：按鈕列，維持橫向排列 */
+.panel-head > div:last-child {
+  display: flex;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
 .route-title{ overflow:hidden; text-overflow:ellipsis; white-space:nowrap; max-width:100%; }
 .stops-list { display:flex; flex-direction:column; gap:8px; max-height:60vh; overflow:auto; padding-right:6px; }
-.stop-item { display:flex; justify-content:space-between; align-items:center; padding:10px; border-radius:8px; background: #fbfdff; border:1px solid rgba(0,0,0,0.03); }
+.stop-item { display:flex; justify-content:space-between; align-items:center; padding:10px; border-radius:8px; background: #EAF2FF; border:1px solid rgba(0,0,0,0.03); }
 .stop-item--highlight { border-color:#e11d48; box-shadow: 0 0 0 3px rgba(225,29,72,.15); }
-.stop-name { font-weight:600; }
+.stop-name {
+  font-size: calc(var(--font-size-md) * 1.2) !important;
+  font-weight: 700;
+}
 .coord { text-align:right; }
 
 /* Responsive for small screens */
@@ -892,3 +963,4 @@ html,body,#root{height:100%;margin:0;}
 .help-left a:hover {
   text-decoration: underline;
 }
+

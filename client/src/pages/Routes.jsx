@@ -116,7 +116,10 @@ export default function RoutesPage() {
           >
             <div className="route-left">
               <div className="route-title">{r.name}</div>
-              <div className="route-sub muted">{r.direction}</div>
+              <div className="route-sub muted">
+                {r.direction === '雙向' ? '折返線' :
+                r.direction === '單向' ? '循環線' : r.direction}
+              </div>
             </div>
             <div className="route-action muted">查看</div>
           </div>

@@ -9,3 +9,5 @@ pandas
 redis
 python-multipart
 openpyxl
+requests
+filelock

@@ -10,12 +10,12 @@
       <nav class="nav">
         <ul>
           <li @click="goTo('dashboard')">系統總覽</li>
-          <li @click="goTo('admin')">管理員帳號管理</li>
-          <li @click="goTo('member')">會員帳號管理</li>
-          <li @click="goTo('reservation')">預約管理</li>
-          <li @click="goTo('car')">車輛管理</li>
-          <li @click="goTo('route')">路線管理</li>
-          <li @click="goTo('schedule')">排班調度</li>
+          <li v-if="canAccessPage('admin')" @click="goTo('admin')">管理員帳號管理</li>
+          <li v-if="canAccessPage('member')" @click="goTo('member')">會員帳號管理</li>
+          <li v-if="canAccessPage('reservation')" @click="goTo('reservation')">預約管理</li>
+          <li v-if="canAccessPage('car')" @click="goTo('car')">車輛管理</li>
+          <li v-if="canAccessPage('route')" @click="goTo('route')">路線管理</li>
+          <li v-if="canAccessPage('schedule')" @click="goTo('schedule')">排班調度</li>
         </ul>
       </nav>
     </aside>
@@ -925,6 +925,27 @@ const currentUserDisplay = computed(() => {
 
   return roleDisplay ? `${username} (${roleDisplay})` : username
 })
+
+// 權限檢查函數
+const canAccessPage = (page: string) => {
+  if (!currentUser.value) return false
+  
+  const role = (currentUser.value.role || '').toLowerCase()
+  
+  // Super Admin 和 Admin 可以存取所有頁面
+  if (role === 'super_admin' || role === 'admin') {
+    return true
+  }
+  
+  // Dispatcher 只能存取特定頁面
+  if (role === 'dispatcher') {
+    const allowedPages = ['reservation', 'car', 'route', 'schedule']
+    return allowedPages.includes(page)
+  }
+  
+  // 其他角色無權限
+  return false
+}
 
 // 標籤頁狀態
 const activeTab = ref('members')

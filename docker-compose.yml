@@ -1,94 +1,112 @@
 services:
-  redis:
+  redis_v2:
     image: redis:7-alpine
-    container_name: hbus-redis
+    container_name: hbus-redis-v2
     ports:
-      - "6379:6379"
+      - "6380:6379"
     volumes:
-      - ./redis_data:/data
+      - ./redis_data_v2:/data
     networks:
-      - hbus-net
+      - hbus-net-v2
 
-  mariadb:
+  mariadb_v2:
     image: mariadb:10.11
-    container_name: hbus-mariadb
+    container_name: hbus-mariadb-v2
     environment:
       - MARIADB_ROOT_PASSWORD=109109
       - MARIADB_DATABASE=bus_system
-    command: ["--port=3307"]
+    user: "root"
+    command: ["--port=3308"]
     ports:
-      - "3307:3307"
+      - "3308:3308"
     volumes:
-      - ./db_data:/var/lib/mysql
+      - ./db_data_v2:/var/lib/mysql
       - ./bus_system_backup.sql:/docker-entrypoint-initdb.d/bus_system_backup.sql
     networks:
-      - hbus-net
+      - hbus-net-v2
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
 
-  client-api:
+  client-api-v2:
     build:
       context: ./Client
       dockerfile: Dockerfile
       args:
         VITE_API_BASE_URL: "/api"
-    container_name: hbus-client-api
+    container_name: hbus-client-api-v2
     ports:
-      - "8700:8700"
+      - "8900:8900"
     environment:
-      REDIS_URL: "redis://hbus-redis:6379/0"
-      FRONTEND_DEFAULT_URL: "https://a18e95fd77f8.ngrok-free.app"
-      LINE_CHANNEL_ID: "2008298748"
-      LINE_CHANNEL_SECRET: "8b363c06ac000d89493ee62511790b48"
+      REDIS_URL: "redis://hbus-redis-v2:6379/0"
+      FRONTEND_DEFAULT_URL: "https://hualenbus.labelnine.app:8900"
+      LINE_CHANNEL_ID: "2008339768"
+      LINE_CHANNEL_SECRET: "e8e798ff0397095f97b1ec5c8e710e8a"
       APP_SESSION_SECRET: "sd8f7s9df8sdf7"
-      Sender_email: "tailin1125@gmail.com"
-      Password_email: "ceaa fcfl wubf mjss"
-      Host: "hbus-mariadb"
+      Sender_email: "trkbus.hualien@gmail.com"
+      Password_email: "glrt gvzx cnid gfca"
+      Host: "hbus-mariadb-v2"
       User: "root"
-      Port: "3307"
+      Port: "3308"
       Password_SQL: "109109"
       Database: "bus_system"
-      MERCHANT_ID: "106952201270001"
-      TERMINAL_ID: "70002146"
-      STORE_CODE: "e4f76eb8-d236-45fb-984b-92b2d1912492"
-      KEY: "3abae022acd6fc873821411c0b402c0fbe90d90bdda295ed15296f8ae465bf8b"
-      IV: "12fe9f5e0c3cc7c664894f19ba265050"
+      MERCHANT_ID: "970612408190001"
+      TERMINAL_ID: "70002166"
+      STORE_CODE: "288cc740-49e9-4d7b-a47a-6b140024d80e"
+      KEY: "14e4753bc9255e2f9f0843c785e8a67314054be65db37164c6cecbec6e081bf7"
+      IV: "9f1de944d491a73be31b95c8ace7a4ab"
       LAYMON: "iqrc.epay365.com.tw"
       TZ: "Asia/Taipei"
       MAIL_SEND_HOUR: "8"
       MAIL_SEND_MIN: "0"
-      ALLOWED_RETURN_ORIGINS: "https://a18e95fd77f8.ngrok-free.app,http://localhost:8700"
+      ALLOWED_RETURN_ORIGINS: "https://hualenbus.labelnine.app:8900,http://localhost:8900"
     depends_on:
-      - redis
-      - mariadb
-    volumes:
-      - "./ssl:/ssl:ro"
+      mariadb_v2:
+        condition: service_healthy
+      redis_v2:
+        condition: service_started
+    # volumes:
+    #   - "D:/SSL:/ssl:ro"
     networks:
-      - hbus-net
-    command: ["uvicorn", "Server:app", "--host", "0.0.0.0", "--port", "8700", "--reload"]
+      - hbus-net-v2
+    # command: >
+    #   bash -c "sleep 15 && uvicorn Server:app --host 0.0.0.0 --port 8900 --ssl-keyfile /ssl/hualenbus.labelnine.app-key.pem --ssl-certfile /ssl/hualenbus.labelnine.app-chain.pem --reload"
+    command: >
+      bash -c "sleep 15 && uvicorn Server:app --host 0.0.0.0 --port 8900 --reload"
 
-  bus-api:
+  bus-api-v2:
     build:
       context: ./my-bus-system
       dockerfile: Dockerfile
-    container_name: hbus-bus-api
+    container_name: hbus-bus-api-v2
     ports:
-      - "8600:8600"
+      - "8800:8800"
     environment:
-      Host: "192.168.0.126"
+      Host: "hbus-mariadb-v2"
       User: "root"
-      Port: "3307"
+      Port: "3308"
       Password_SQL: "109109"
       Database: "bus_system"
     depends_on:
-      - redis
-      - mariadb
-    volumes:
-      - "./ssl:/ssl:ro"
-    command: ["npm", "run", "serve"]
-
+      mariadb_v2:
+        condition: service_healthy
+      redis_v2:
+        condition: service_started
+    # volumes:
+    #   - "D:/SSL:/ssl:ro"
+    networks:
+      - hbus-net-v2
+    # command: >
+    #   bash -c "npm run serve"
+    command: >
+      bash -c "npm run build && python3 -m uvicorn app:app --host 0.0.0.0 --port 8800 --reload --log-level info"    
 volumes:
-  mysql_data:
-  mariadb_data:
-  
+  mysql_data_v2:
+  mariadb_data_v2:
+
 networks:
-  hbus-net:
+  hbus-net-v2:
+    name: hbus-net-v2   # 🔹 固定網路名稱，避免出現 h_bus2_hbus-net-v2 這種變體
     driver: bridge

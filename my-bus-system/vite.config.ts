@@ -6,30 +6,30 @@ export default defineConfig({
   plugins: [vue()],
   server: {
     host: '0.0.0.0', 
-    port: 5173,
+    port: 8850,
     proxy: {
       '/api': {
-        target: 'http://localhost:8600',
+        target: 'http://localhost:8850',
         changeOrigin: true,
         secure: false,
       },
       '/auth': {
-        target: 'http://localhost:8600',
+        target: 'http://localhost:8850',
         changeOrigin: true,
         secure: false,
       },
       '/users': {
-        target: 'http://localhost:8600',
+        target: 'http://localhost:8850',
         changeOrigin: true,
         secure: false,
       },
       '/Create_users': {
-        target: 'http://localhost:8600',
+        target: 'http://localhost:8850',
         changeOrigin: true,
         secure: false,
       },
       '/All_Route': {
-        target: 'http://localhost:8600',
+        target: 'http://localhost:8850',
         changeOrigin: true,
       },
     },

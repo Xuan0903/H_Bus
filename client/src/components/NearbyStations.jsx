@@ -125,7 +125,17 @@ export default function NearbyStations({ onClose }) {
 
   return (
     <div ref={overlayRef} className="route-detail-overlay" role="dialog" aria-modal="true" onClick={handleBackdrop}>
-      <div className="route-detail-panel" onClick={(e) => e.stopPropagation()}>
+      <div
+          className="route-detail-panel"
+          onClick={(e) => e.stopPropagation()}
+          style={{
+            maxHeight: "85vh",      // ⭐ 限制最高 85% 螢幕
+            overflow: "hidden",     // ⭐ 超出不允許
+            display: "flex",
+            flexDirection: "column"
+          }}
+        >
+
         <div className="panel-head">
           <div>
             <div className="route-title">附近站點</div>
@@ -146,10 +156,26 @@ export default function NearbyStations({ onClose }) {
           </div>
         </div>
 
-        <div style={{ display:'grid', gridTemplateColumns:'minmax(220px, 1fr)', gap:10 }}>
+        <div
+            style={{
+              flex: 1,
+              display: "flex",
+              flexDirection: "column",
+              overflow: "hidden",
+              gap: 10
+            }}
+          >
           <div ref={elRef} style={{ width:'100%', height: 320, borderRadius: 12, overflow:'hidden', border:'1px solid rgba(0,0,0,.06)' }} />
 
-          <div className="list">
+          <div
+            className="list"
+            style={{
+              flex: 1,
+              overflowY: "auto",
+              paddingBottom: 10
+            }}
+          >
+
             {nearest.map((s, i) => (
               <div className={`item ${selectedId===s.id?'selected':''}`} key={s.id} data-station-id={s.id}>
                 <div>
