@@ -175,25 +175,27 @@ export default function RouteDetail({ route, onClose, highlightStop }) {
             }}
           >
             {/* 去程 / 回程切換 */}
-            <button
-              className="btn"
-              onClick={() => {
-                if (!isSingleDirection) {
-                  setSelectedDir(selectedDir === "去程" ? "回程" : "去程")
-                }
-              }}
-              disabled={isSingleDirection}
-              style={{
-                backgroundColor: selectedDir === "去程" ? "#2563eb" : "#6b7280",
-                color: "#fff",
-                padding: "6px 16px",
-                borderRadius: 8,
-                fontSize: "15px",
-                fontWeight: 600,
-              }}
-            >
-              {selectedDir}
-            </button>
+            {!isSingleDirection && (
+              <button
+                className="btn"
+                onClick={() => {
+                  if (!isSingleDirection) {
+                    setSelectedDir(selectedDir === "去程" ? "回程" : "去程")
+                  }
+                }}
+                disabled={isSingleDirection}
+                style={{
+                  backgroundColor: selectedDir === "去程" ? "#2563eb" : "#6b7280",
+                  color: "#fff",
+                  padding: "6px 16px",
+                  borderRadius: 8,
+                  fontSize: "15px",
+                  fontWeight: 600,
+                }}
+              >
+                {selectedDir}
+              </button>
+            )}
 
             {/* 地圖 / 時刻表切換 */}
             <button
