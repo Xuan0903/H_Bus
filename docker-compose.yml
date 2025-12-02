@@ -41,7 +41,7 @@ services:
       - "8900:8900"
     environment:
       REDIS_URL: "redis://hbus-redis-v2:6379/0"
-      FRONTEND_DEFAULT_URL: "https://hualenbus.labelnine.app:8900"
+      FRONTEND_DEFAULT_URL: "http://localhost:8900"
       LINE_CHANNEL_ID: "2008339768"
       LINE_CHANNEL_SECRET: "e8e798ff0397095f97b1ec5c8e710e8a"
       APP_SESSION_SECRET: "sd8f7s9df8sdf7"
