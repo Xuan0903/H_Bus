@@ -489,6 +489,9 @@ function RouteMap({ stops, cars, route }) {
     const busLayer = layerBusRef.current
     busLayer.clearLayers()
 
+    const iconSize = 50
+    const iconFontSize = 54
+
     // cars = [{X, Y, direction, route}]
     cars.forEach(car => {
       if (!car.X || !car.Y) return
@@ -500,15 +503,15 @@ function RouteMap({ stops, cars, route }) {
           display:flex;
           align-items:center;
           justify-content:center;
-          width:32px;
-          height:32px;
+          width:${iconSize}px;
+          height:${iconSize}px;
           border-radius:50%;
-          background:#2563eb;
-          border:2px solid #fff;
-          color:#fff;
-          font-size:18px;
+          background:#ffffff; /* 底色設定為白色 */
+          border:none; /* 直接去除外框 */
+          color:#2563eb; /* 公車圖案顏色設為藍色 */
+          font-size:${iconFontSize}px;
           font-weight:900;
-          box-shadow:0 0 6px rgba(0,0,0,0.3);
+          box-shadow:0 0 12px rgba(0,0,0,0.4); /* 增加陰影讓它看起來更立體 */
         ">
           🚌
         </div>
@@ -517,11 +520,42 @@ function RouteMap({ stops, cars, route }) {
       const icon = L.divIcon({
         className: '',
         html: iconHtml,
-        iconSize: [32, 32],
-        iconAnchor: [16, 16],
+        iconSize: [iconSize, iconSize],
+        iconAnchor: [iconSize / 2, iconSize / 2], // 確保錨點在中心
       })
 
-      L.marker(busPt, { icon }).addTo(busLayer)
+      L.marker(busPt, { 
+        icon,
+        zIndexOffset: 1000 // // 最上層顯示 (Z-index)
+      }).addTo(busLayer)
+
+      // const iconHtml = `
+      //   <div style="
+      //     display:flex;
+      //     align-items:center;
+      //     justify-content:center;
+      //     width:32px;
+      //     height:32px;
+      //     border-radius:50%;
+      //     background:#2563eb;
+      //     border:2px solid #fff;
+      //     color:#fff;
+      //     font-size:18px;
+      //     font-weight:900;
+      //     box-shadow:0 0 6px rgba(0,0,0,0.3);
+      //   ">
+      //     🚌
+      //   </div>
+      // `
+
+      // const icon = L.divIcon({
+      //   className: '',
+      //   html: iconHtml,
+      //   iconSize: [32, 32],
+      //   iconAnchor: [16, 16],
+      // })
+
+      // L.marker(busPt, { icon }).addTo(busLayer)
     })
   }, [ready, cars])
 
