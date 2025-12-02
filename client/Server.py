@@ -1949,10 +1949,14 @@ async def callback(request: Request):
         # IV_bits = ''.join(format(b, '08b') for b in IV.encode())
         data = decrypt_aes(enc_data,key = KEY_bits, iv = IV_bits) # THere
         data = json.loads(data)
+        return_code = data.get("return_code")
+        transaction_status = data.get("status")
         order_number = data.get("pos_order_number")
         reservation_id = r.get(f"paymap:{order_number}")
 
-        if order_number:
+        is_success = (return_code == "0000" and transaction_status == 1)
+
+        if order_number and is_success:
             sql = f"UPDATE reservation SET payment_status = 'paid' WHERE reservation_id = '{reservation_id}'"
             print(sql)
             MySQL_Doing.run(sql)

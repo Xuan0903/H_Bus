@@ -130,7 +130,7 @@ export default function MyReservations({ user, filterExpired = false }) {
                 </div>
               </div>
               <div className="resv-actions">
-                <button className="btn btn-blue" onClick={() => { setSelectedResv(r); setShowRouteModal(true) }}>查看路線</button>
+                <button className="btn btn-blue" onClick={() => { setSelectedResv(r); setShowRouteModal(true) }}>查看訂單</button>
                 {cancellable && (
                   <button className="btn" onClick={() => setCancelTarget(r)}>取消</button>
                 )}
