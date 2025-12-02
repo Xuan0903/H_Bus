@@ -237,6 +237,15 @@
                 </select>
               </div>
             </div>
+            <div 
+              v-if="editMode && form.review_status === 'canceled'" 
+              class="form-row lock-notice"
+            >
+              <div class="form-group full-width">
+                <label class="form-label">取消原因</label>
+                <span class="notice-text">{{ form.cancel_reason || '無' }}</span>
+              </div>
+            </div>
             <div class="form-row">
               <div class="form-group">
                 <label class="form-label">派車狀態</label>

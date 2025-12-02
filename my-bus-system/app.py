@@ -2769,7 +2769,7 @@ def list_reservations(
                    booking_start_station_name, booking_end_station_name,
                    payment_method, payment_record, payment_status,
                    review_status, dispatch_status, reservation_status,
-                   created_at, updated_at
+                   cancel_reason, created_at, updated_at
             FROM reservation
             WHERE {where_clause}
             ORDER BY reservation_id {order_clause}
