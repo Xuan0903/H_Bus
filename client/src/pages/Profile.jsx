@@ -20,6 +20,8 @@ function ProfilePage({ user, onLogin, onLogout }) {
   const [showMoreTrips, setShowMoreTrips] = useState(false)
   const [privacyContent, setPrivacyContent] = useState('')
   const [showPrivacy, setShowPrivacy] = useState(false)
+  const [reserveContent, setReserveContent] = useState('')
+  const [showReserve, setShowReserve] = useState(false)
   const supportPhone = "0800-827656";
   const phoneDisplay = supportPhone.replace(/(\d{4})(\d{3})(\d{3})/,'$1 $2 $3');
   const supportEmail = "aspring51000@gmail.com";
@@ -52,6 +54,16 @@ function ProfilePage({ user, onLogin, onLogout }) {
       })
       .catch(err => console.error(err))
   }
+
+  function viewReserve() {
+    fetch('/api/reserve')
+      .then(resp => resp.json())
+      .then(data => {
+        setReserveContent(data.content)
+        setShowReserve(true)
+      })
+      .catch(err => console.error(err))
+  }  
 
   // 加上時間判斷
   const now = new Date()
@@ -480,7 +492,7 @@ useEffect(() => {
               <div className="help-item">
                 <div className="help-left">
                   <div className="help-title" style={{ textAlign: 'center' }}>隱私政策</div>
-                  <div className="help-sub muted">查看隱私政策與個資使用說明</div>
+                  {/* <div className="help-sub muted">查看隱私政策與個資使用說明</div> */}
                 </div>
                   <button
                     type="button"
@@ -491,6 +503,22 @@ useEffect(() => {
                     查看
                   </button>
               </div>
+
+              {/* 預約規範 */}
+              <div className="help-item">
+                <div className="help-left">
+                  <div className="help-title" style={{ textAlign: 'center' }}>預約規範</div>
+                  {/* <div className="help-sub muted">查看預約規範說明</div> */}
+                </div>
+                  <button
+                    type="button"
+                    className="btn btn-primary"
+                    onClick={viewReserve}
+                    style={{ width: '100%', display: 'block' }}
+                  >
+                    查看
+                  </button>
+              </div>              
 
               {/* 權益與保障 */}
               <div className="help-item help-rights">
@@ -563,6 +591,21 @@ useEffect(() => {
               <pre style={{ whiteSpace: 'pre-wrap', fontSize: '14px' }}>{privacyContent}</pre>
               <div className="modal-actions">
                 <button className="btn btn-orange" onClick={() => setShowPrivacy(false)}>
+                  關閉
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* 預約規範 Modal */}
+        {showReserve && (
+          <div className="modal-overlay">
+            <div className="modal-card" style={{ maxHeight: '80vh', overflowY: 'auto' }}>
+              <h3 className="help-title" style={{ fontWeight: '800', fontSize: '18px', marginBottom: '12px' }}>預約規範          </h3>
+              <pre style={{ whiteSpace: 'pre-wrap', fontSize: '14px' }}>{reserveContent}</pre>
+              <div className="modal-actions">
+                <button className="btn btn-orange" onClick={() => setShowReserve(false)}>
                   關閉
                 </button>
               </div>
