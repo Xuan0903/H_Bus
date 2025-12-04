@@ -413,23 +413,61 @@ function RouteMap({ stops, cars, route }) {
       return Number.isFinite(lat) && Number.isFinite(lng) ? [lat, lng] : null
     }).filter(Boolean)
 
+    // 導航路徑點清單：包含所有站點與隱藏路徑點
+    const FULL_ROUTE_WAYPOINTS_BUS_6_RETURN = [
+      // [緯度, 經度]
+      [23.993020, 121.603219],   // 站點 1
+      [23.983500, 121.607429],   // 站點 2
+      [23.980242, 121.610008],   // 站點 3
+      // [23.978502, 121.611624],   // 站點 4: 花蓮醫院慈愛大樓（原站點）
+      [23.978331, 121.611559],   // 站點 4: 花蓮醫院慈愛大樓 （路線用）
+
+      // 隱藏路徑點
+      [23.977804, 121.612066],   // 明禮x公園
+
+      [23.982743, 121.621506],   // 站點 5: 璽濱行旅
+      [23.987023, 121.622277],   // 站點 6: 煙波飯店
+      [23.988663, 121.623682],   // 站點 7
+      [23.988172, 121.626170],   // 站點 8
+    ];
+    
     async function drawFullRoute() {
       if (llOriginal.length < 2) return
-      let shapeCoords = route.shape // ← 後端 API 的完整 shape
+      let shapeCoords = route.shape 
+      
+      // 這是我們的核心修改：取得單一、完整的路徑點列表
+      let pointsForRouting;
+      
+      // 判斷目前是否為需要修正的路線
+      // 實際應用中，你需要在這裡檢查 props 或 state 傳入的 Route ID
+      const IS_BUS_6_RETURN = false; // 這裡假設為 true
+      
+      if (IS_BUS_6_RETURN) {
+          // 直接使用我們手動維護的完整路徑列表
+          pointsForRouting = FULL_ROUTE_WAYPOINTS_BUS_6_RETURN;
+          console.log(`啟用單一清單導航，總計 ${pointsForRouting.length} 個點。`);
+      } else {
+          // 如果是其他路線，就退回使用原始的 llOriginal (8個站點)
+          pointsForRouting = llOriginal; 
+      }
+
       if (!shapeCoords || shapeCoords.length === 0) {
-        // fallback：用 OSRM 計算整條路線（如果後端沒有 shape）
-        const coords = llOriginal.map(p => `${p[1]},${p[0]}`).join(";")
+        // fallback：用 OSRM 計算整條路線
+        
+        // 將完整的路徑點列表轉換成 OSRM 格式
+        const coords = pointsForRouting.map(p => `${p[1]},${p[0]}`).join(";") // 格式：經度,緯度;經度,緯度
         const url = `https://router.project-osrm.org/route/v1/driving/${coords}?overview=full&geometries=geojson`
 
         try {
           const res = await fetch(url)
           const data = await res.json()
           if (data.routes && data.routes[0]?.geometry) {
+            // OSRM 回傳的 shapeCoords 是 [lng, lat] 格式，需轉為 Leaflet 的 [lat, lng]
             shapeCoords = data.routes[0].geometry.coordinates.map(([lng, lat]) => [lat, lng])
           }
         } catch (err) {
           console.warn("OSRM 失敗，退回直線", err)
-          shapeCoords = llOriginal
+          shapeCoords = llOriginal 
         }
       }
 
