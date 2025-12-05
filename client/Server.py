@@ -1987,6 +1987,20 @@ async def callback(request: Request):
         # KEY_bits = ''.join(format(b, '08b') for b in KEY.encode())
         # IV_bits = ''.join(format(b, '08b') for b in IV.encode())
         data = decrypt_aes(enc_data,key = KEY_bits, iv = IV_bits) # THere
+
+        # 實體 log 紀錄
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        log_entry = f"[金流 /callback] [{timestamp}] Decrypted Data: {data}\n"
+        
+        try:
+            # 使用 'a' 模式 (append) 附加內容到檔案
+            with open("callback_decrypted_log.txt", "a", encoding="utf-8") as f:
+                f.write(log_entry)
+        except Exception as file_e:
+            # 即使寫檔失敗，也不影響金流流程，僅印出警告
+            print(f"[WARN] 寫入解密資料日誌失敗: {file_e}")
+        # 實體 log 紀錄
+
         data = json.loads(data)
         return_code = data.get("return_code")
         transaction_status = data.get("status")
