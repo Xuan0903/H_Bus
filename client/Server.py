@@ -2007,7 +2007,7 @@ async def callback(request: Request):
         order_number = data.get("pos_order_number")
         reservation_id = r.get(f"paymap:{order_number}")
 
-        is_success = (return_code == "0000" and transaction_status == 1)
+        is_success = (return_code == "0000" and transaction_status == 2)
 
         if order_number and is_success:
             sql = f"UPDATE reservation SET payment_status = 'paid' WHERE reservation_id = '{reservation_id}'"
