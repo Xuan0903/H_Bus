@@ -2033,6 +2033,30 @@ _GIS_ALL_TTL = 30  # seconds
 _GIS_ALL_LOCK = RLock()
 
 app.include_router(api)
+
+# ====================================
+# 新增：處理快取
+# ====================================
+
+@app.get("/", include_in_schema=False)
+def serve_index_no_cache():
+    """ 覆寫根路徑處理，提供 index.html 並禁用快取 """
+    index_path = os.path.join("dist", "index.html")
+    
+    # 防呆：確保檔案存在
+    if not os.path.exists(index_path):
+        raise HTTPException(status_code=404, detail="Frontend build not found.")
+        
+    # 建立 FileResponse
+    response = FileResponse(index_path)
+
+    # 設定 Headers，禁止瀏覽器快取這個檔案
+    response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+    response.headers["Pragma"] = "no-cache"
+    response.headers["Expires"] = "0"
+    
+    return response
+
 app.mount('/', StaticFiles(directory='dist', html=True), name='client')
 
 @app.exception_handler(StarletteHTTPException)
