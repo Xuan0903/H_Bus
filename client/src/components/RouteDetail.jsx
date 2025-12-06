@@ -234,7 +234,7 @@ export default function RouteDetail({ route, onClose, highlightStop }) {
         {!isStatic ? (
           <>
             {viewMode === 'map' ? (
-              <RouteMap stops={stops} cars={cars} route={route} />
+              <RouteMap stops={stops} cars={cars} route={route} direction={selectedDir} />
             ) : (
               <div className="stops-list">
                 {loading && <div className="muted">載入中…</div>}
@@ -314,7 +314,7 @@ export default function RouteDetail({ route, onClose, highlightStop }) {
           </>
         ) : (
           viewMode === 'map' ? (
-            <RouteMap stops={staticStopsForMap} cars={cars} route={route} />
+            <RouteMap stops={staticStopsForMap} cars={cars} route={route} direction={selectedDir} />
           ) : (
             <div className="stops-list">
               {displayStops.map((s, idx) => (
@@ -379,7 +379,105 @@ function useLeaflet() {
   return ready
 }
 
-function RouteMap({ stops, cars, route }) {
+// A. 完整的導航路徑點清單：定義為【去程】的精確順序 (花蓮轉運站 -> 門諾醫院)
+const FULL_ROUTE_WAYPOINTS_BUS_5_GO = [
+  // [緯度, 經度]
+  [23.992880, 121.603436],  // 站牌 1: 花蓮轉運站 (去程起點)
+  [23.994154, 121.604035],
+  [23.994436, 121.603569],
+  [24.001673, 121.607527],  // 十六股大道
+  [24.001283, 121.613227],
+  [23.993134, 121.616978],
+  [23.992948, 121.618059],  // 站牌 2
+  [23.992633, 121.618969],  // 站牌 3
+  [23.991393, 121.618781],  // 站牌 4
+  [23.990350, 121.618761],  // 左轉 (中繼點)
+  [23.989914, 121.621415],
+  [23.989492, 121.619704],  // 站牌 5
+  [23.989163, 121.621378],  // 站牌 5 out
+  [23.988637, 121.621244],
+  [23.988996, 121.618588],
+  // [23.988005, 121.618245],  // 站牌 6
+  // [23.987822, 121.618336],  // back (迴轉點)
+  [23.990096, 121.618681],  // 花蓮縣政府調度室
+  [23.990634, 121.616636],
+  [23.991914, 121.616793],  // 站牌 7
+  [23.992905, 121.618345],
+  [23.991352, 121.620766],
+  [23.991483, 121.620159]   // 站牌 8
+];
+const FULL_ROUTE_WAYPOINTS_BUS_5_RE = [
+  // [緯度, 經度]
+  [23.991320, 121.619951],  // 站牌 1: 花蓮縣政府
+  [23.991414, 121.620812],  // 縣政府出左轉 (中繼點)
+  [23.992667, 121.620798],  // 瑞美路
+  [23.992748, 121.618984],  // 左轉府後路
+  [23.988977, 121.618753],  // 十字路口左轉介壽四街
+  [23.989138, 121.621368],  // 左轉蘇花公路
+  [23.989493, 121.619711],  // 法院
+  [23.989547, 121.621434],  // 法院出來左轉
+  [23.990257, 121.619469],  // 左轉介壽五街
+  [23.990813, 121.616600],  // 右轉新興路
+  [23.995210, 121.616732],
+  [24.001582, 121.606885],
+  [23.997408, 121.604855],  // 國興一街
+  [23.993504, 121.603200],  // 左轉國民八街
+  [23.992623, 121.603013]
+];
+const FULL_ROUTE_WAYPOINTS_BUS_6_GO = [
+  // [緯度, 經度]
+  [23.993020, 121.603219],   // 站牌 1: 花蓮轉運站 (去程起點)
+  [23.983500, 121.607429],   // 站牌 2
+  [23.980242, 121.610008],   // 站牌 3
+  [23.978331, 121.611559],   // 站牌 4: 花蓮醫院慈愛大樓 (修正點路線用)
+  [23.977804, 121.612066],   // 明禮x公園
+  [23.982743, 121.621506],   // 站牌 5: 璽濱行旅 (舊座標)
+  [23.984846, 121.621697],
+  [23.987023, 121.622277],   // 站牌 6: 煙波飯店
+  [23.988663, 121.623682],   // 站牌 7
+  [23.988535, 121.626440]    // 站牌 8: 門諾醫院 (修正後的路線終點座標)
+];
+const FULL_ROUTE_WAYPOINTS_BUS_6_RE = [
+  // [緯度, 經度]
+  [23.988574, 121.626244],  // 門諾醫院 (回程起點)
+  [23.988485, 121.624943],  // 民權八街
+  [23.988851, 121.623602],  // 左轉中美路
+  [23.985341, 121.620978],  // 左轉民權五街
+  [23.981949, 121.620637],  // 民權路
+  [23.980376, 121.615715],  // 菁華街
+  [23.978328, 121.612864],  // 圓弧
+  [23.978187, 121.611727],  // 右轉明禮路
+  [23.984106, 121.607085],  // 叉路
+  [23.992051, 121.605087],  // 左轉國聯四路
+  [23.992658, 121.602928]   // 花蓮轉運站 (回程終點)
+];
+const FULL_ROUTE_WAYPOINTS_BUS_7 = [
+  // [緯度, 經度]
+  [23.993477, 121.603394],  // 轉運站
+  [23.994173, 121.604330],  // 國聯一路
+  [23.993036, 121.604443],  // 國民八街
+  [23.991313, 121.603270],  // 國聯三路
+  [23.988999, 121.600384],  // 國聯一路
+  [23.988541, 121.600409],  // 中山路
+  [23.984746, 121.603367],  // 自由廣場
+  [23.982258, 121.605351],
+  [23.978442, 121.602068],  // 仁愛
+  [23.975257, 121.606532],
+  [23.972469, 121.608785],  // 自由街底
+  [23.973208, 121.610151],  // 東大門夜市
+  [23.975851, 121.608322],  // 光復街尾
+  [23.977512, 121.611650],  // 花崗國民中學
+  [23.979378, 121.610766],  // 明禮路
+  [23.980547, 121.612377],  // 將軍府
+  [23.979658, 121.610559],  // 折返點
+  [23.982020, 121.608574],  // 明禮路x大同街
+  [23.984837, 121.606906],
+  [23.993727, 121.604863],  // 國聯五路
+  [23.993832, 121.603979],  // 國聯一路
+  [23.992613, 121.603035]
+];
+
+function RouteMap({ stops, cars, route, direction }) {
   const ready = useLeaflet()
   const elRef = useRef(null)
   const mapRef = useRef(null)
@@ -413,42 +511,45 @@ function RouteMap({ stops, cars, route }) {
       return Number.isFinite(lat) && Number.isFinite(lng) ? [lat, lng] : null
     }).filter(Boolean)
 
-    // 導航路徑點清單：包含所有站點與隱藏路徑點
-    const FULL_ROUTE_WAYPOINTS_BUS_6_RETURN = [
-      // [緯度, 經度]
-      [23.993020, 121.603219],   // 站點 1
-      [23.983500, 121.607429],   // 站點 2
-      [23.980242, 121.610008],   // 站點 3
-      // [23.978502, 121.611624],   // 站點 4: 花蓮醫院慈愛大樓（原站點）
-      [23.978331, 121.611559],   // 站點 4: 花蓮醫院慈愛大樓 （路線用）
-
-      // 隱藏路徑點
-      [23.977804, 121.612066],   // 明禮x公園
-
-      [23.982743, 121.621506],   // 站點 5: 璽濱行旅
-      [23.987023, 121.622277],   // 站點 6: 煙波飯店
-      [23.988663, 121.623682],   // 站點 7
-      [23.988172, 121.626170],   // 站點 8
-    ];
-    
     async function drawFullRoute() {
       if (llOriginal.length < 2) return
-      let shapeCoords = route.shape 
-      
-      // 這是我們的核心修改：取得單一、完整的路徑點列表
+      let shapeCoords = route.shape
+
       let pointsForRouting;
-      
-      // 判斷目前是否為需要修正的路線
-      // 實際應用中，你需要在這裡檢查 props 或 state 傳入的 Route ID
-      const IS_BUS_6_RETURN = false; // 這裡假設為 true
-      
-      if (IS_BUS_6_RETURN) {
-          // 直接使用我們手動維護的完整路徑列表
-          pointsForRouting = FULL_ROUTE_WAYPOINTS_BUS_6_RETURN;
-          console.log(`啟用單一清單導航，總計 ${pointsForRouting.length} 個點。`);
+
+      console.log(direction);
+      const IS_RETURN_DIRECTION = direction === '回程'; // 使用傳入的方向判斷
+      const IS_ROUTE_5 = Number(route.id) === 1; // 市民小巴5 的 ID=1
+      const IS_ROUTE_6 = Number(route.id) === 2; // 市民小巴6 的 ID=2
+      const IS_ROUTE_7 = Number(route.id) === 3; // 市民小巴7 的 ID=3
+
+      if (IS_ROUTE_5) {
+        if (!IS_RETURN_DIRECTION) {
+          // 情況 1: 路線 5 且是【去程】
+          pointsForRouting = FULL_ROUTE_WAYPOINTS_BUS_5_GO;
+          console.log(`啟用小巴5去程精確導航 (靜態清單)，總計 ${pointsForRouting.length} 個點。`);
+        } else {
+          // 情況 2: 路線 5 且是【回程】
+          pointsForRouting = FULL_ROUTE_WAYPOINTS_BUS_5_RE;
+          console.log(`啟用小巴5回程精確導航 (靜態清單)，總計 ${pointsForRouting.length} 個點。`);
+        }
+      } else if (IS_ROUTE_6) {
+        if (!IS_RETURN_DIRECTION) {
+          // 情況 1: 路線 6 且是【去程】 (靜態清單就是去程順序)
+          pointsForRouting = FULL_ROUTE_WAYPOINTS_BUS_6_GO;
+          console.log(`啟用小巴6去程精確導航 (靜態清單)，總計 ${pointsForRouting.length} 個點。`);
+        } else {
+          // 情況 2: 路線 6 且是【回程】
+          pointsForRouting = FULL_ROUTE_WAYPOINTS_BUS_6_RE;
+          console.log(`啟用小巴6回程精確導航 (靜態清單)，總計 ${pointsForRouting.length} 個點。`);
+        }
+      } else if (IS_ROUTE_7) {
+        // 循環線 共用
+        pointsForRouting = FULL_ROUTE_WAYPOINTS_BUS_7;
+        console.log(`啟用小巴6去程精確導航 (靜態清單)，總計 ${pointsForRouting.length} 個點。`);
       } else {
-          // 如果是其他路線，就退回使用原始的 llOriginal (8個站點)
-          pointsForRouting = llOriginal; 
+        // 其他路線，退回使用原始的 llOriginal 清單
+        pointsForRouting = llOriginal; 
       }
 
       if (!shapeCoords || shapeCoords.length === 0) {
