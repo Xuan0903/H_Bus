@@ -115,7 +115,87 @@ export default function MyReservations({ user, filterExpired = false }) {
               String(r.dispatch_status || '').toLowerCase().includes(keyword)
             )
 
+          const reviewStatus = translateStatus(r.review_status)
+          const paymentStatus = translateStatus(r.payment_status)
+          let primaryAction = null
+
+          if (paymentStatus !== '已付款') {
+            // 情況 A: 尚未付款
+            if (reviewStatus === '審核通過') {
+              // A-1: 審核通過，顯示付款按鈕
+              primaryAction = (
+                <button
+                  className="btn btn-blue"
+                  onClick={async () => {
+                    try {
+                      const amount = String(r.booking_number * 50)
+                      const orderNumber = String(r.booking_code || r.reservation_id)
+                      const confirmed = window.confirm('即將前往付款頁面，是否繼續？')
+                      if (!confirmed) return
+                      // Call payments API
+                      const resp = await fetch('/payments', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ amount, order_number: orderNumber }),
+                      })
+                      if (!resp.ok) throw new Error('付款連線失敗')
+                      const data = await resp.json()
+                      if (!data.pay_url) throw new Error('未回傳付款連結')
+                      window.location.href = data.pay_url
+                    } catch (err) {
+                      console.error(err)
+                      alert(err.message || '付款失敗')
+                    }
+                  }}
+                >
+                請付款
+                </button>
+              )
+            } else {
+              // A-2: 尚未審核通過 (待審核/已拒絕)，顯示狀態
+              const btnClass = reviewStatus === '已拒絕' ? 'btn-danger' : 'btn-blue-outline'
+              const displayStatus = reviewStatus === '等待審核' ? '待審核' : reviewStatus
+              primaryAction = (
+                <button className={`btn ${btnClass}`} disabled>
+                  {displayStatus}
+                </button>
+              )
+            }
+          } else {
+            // 情況 B: 已付款
+            primaryAction = (
+                <button className="btn btn-blue" onClick={() => {
+                  setSelectedResv(r);
+                  setShowRouteModal(true);
+                  setShowQr(false);
+                }}>
+                  上車票卷
+                </button>
+            )
+          }
+
           return (
+            // <div className="resv-card" key={i}>
+            //   <div className="resv-main">
+            //     <div className="resv-title">{r.booking_start_station_name} → {r.booking_end_station_name}</div>
+            //     <div className="resv-sub">{fmt(r.booking_time)} ・ {r.booking_number} 人</div>
+            //     <div className="small" style={{ color: '#000' }}>
+            //       預約代碼：{r.booking_code || r.reservation_id}
+            //     </div>
+            //     {/* <div className="resv-status">
+            //       <span className={`status-chip ${cls(r.review_status)}`}>審核：{translateStatus(r.review_status)}</span>
+            //       <span className={`status-chip ${cls(r.payment_status)}`}>付款：{translateStatus(r.payment_status)}</span>
+            //       <span className={`status-chip ${cls(r.dispatch_status)}`}>派車：{translateStatus(r.dispatch_status)}</span>
+            //     </div> */}
+            //   </div>
+            //   <div className="resv-actions">
+            //     <button className="btn btn-blue" onClick={() => { setSelectedResv(r); setShowRouteModal(true) }}>查看訂單</button>
+            //     {cancellable && (
+            //       <button className="btn" onClick={() => setCancelTarget(r)}>取消訂單</button>
+            //     )}
+            //   </div>
+            // </div>
+            
             <div className="resv-card" key={i}>
               <div className="resv-main">
                 <div className="resv-title">{r.booking_start_station_name} → {r.booking_end_station_name}</div>
@@ -123,16 +203,11 @@ export default function MyReservations({ user, filterExpired = false }) {
                 <div className="small" style={{ color: '#000' }}>
                   預約代碼：{r.booking_code || r.reservation_id}
                 </div>
-                <div className="resv-status">
-                  <span className={`status-chip ${cls(r.review_status)}`}>審核：{translateStatus(r.review_status)}</span>
-                  <span className={`status-chip ${cls(r.payment_status)}`}>付款：{translateStatus(r.payment_status)}</span>
-                  <span className={`status-chip ${cls(r.dispatch_status)}`}>派車：{translateStatus(r.dispatch_status)}</span>
-                </div>
               </div>
               <div className="resv-actions">
-                <button className="btn btn-blue" onClick={() => { setSelectedResv(r); setShowRouteModal(true) }}>查看訂單</button>
+                {primaryAction}
                 {cancellable && (
-                  <button className="btn" onClick={() => setCancelTarget(r)}>取消</button>
+                  <button className="btn" onClick={() => setCancelTarget(r)}>取消訂單</button>
                 )}
               </div>
             </div>
