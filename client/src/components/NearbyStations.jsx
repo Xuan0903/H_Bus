@@ -180,7 +180,8 @@ export default function NearbyStations({ onClose }) {
               <div className={`item ${selectedId===s.id?'selected':''}`} key={s.id} data-station-id={s.id}>
                 <div>
                   <div style={{ fontWeight:700 }}>{i + 1}. {s.name}</div>
-                  <div className="item-desc">{(s.route || '').trim()}（{s.dir || ''}） · {Math.round(s.dist)} m</div>
+                  {/* <div className="item-desc">{(s.route || '').trim()}（{s.dir || ''}） · {Math.round(s.dist)} m</div> */}
+                  <div className="item-desc">{Math.round(s.dist)} m</div>
                 </div>
                 <button className="btn" onClick={() => { setSelectedId(s.id); if (mapRef.current) mapRef.current.setView([s.lat, s.lng], 16) }}>地圖</button>
               </div>
