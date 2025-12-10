@@ -527,7 +527,7 @@ useEffect(() => {
                   <div className="help-sub muted">退款、申訴與個資權益重點</div>
                   <ul className="rights-list">
                     <li>
-                      <strong>退款/退票：</strong>依本平台退票規範辦理，申請後 7 個工作日處理。
+                      <strong>退款/退票：</strong>依本平台退票規範辦理，申請後 3-14 個工作日處理。
                     </li>
                     <li>
                       <strong>客訴處理：</strong>受理後 48 小時內回覆處理進度。

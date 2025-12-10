@@ -647,7 +647,7 @@ function RouteMap({ stops, cars, route, direction }) {
           width:${iconSize}px;
           height:${iconSize}px;
           border-radius:50%;
-          background:#ffffff; /* 底色設定為白色 */
+          background:#eb6725ff; /* 底色設定為白色 */
           border:none; /* 直接去除外框 */
           color:#2563eb; /* 公車圖案顏色設為藍色 */
           font-size:${iconFontSize}px;
